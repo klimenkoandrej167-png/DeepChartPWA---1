@@ -46,7 +46,7 @@ export const useChartStore = create<ChartState>()((set) => ({
           high:   Math.max(last.high, c.high),
           low:    Math.min(last.low, c.low),
           close:  c.close,
-          volume: (last.volume ?? 0) + (c.volume ?? 0),
+          volume: c.volume ?? last.volume ?? 0,
         };
         const next = [...arr];
         next[next.length - 1] = merged;

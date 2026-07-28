@@ -3,7 +3,7 @@ import { useChartStore } from '../store/chartStore';
 import { useIndicatorStore } from '../store/indicatorStore';
 import { useSignalStore } from '../store/signalStore';
 import { useSettingsStore } from '../store/settingsStore';
-import { useStrategiesStore } from '../store/strategiesStore';
+import { useStrategiesStore, filterByStrategyToggles } from '../store/strategiesStore';
 import { useAudioAlert } from './useAudioAlert';
 import { runAllDetectors } from '../patterns/index';
 import { intervalToMs } from '../utils/timeframeUtils';
@@ -18,7 +18,7 @@ import { calcImpulseVelocity, calcImpulseVelocitySeries } from '../utils/impulse
 import { detectSwings } from '../indicators/trendStructure';
 import { calcSupportResistance } from '../indicators/supportResistance';
 import { calcSmartMoney } from '../indicators/superOrderBlock';
-import { computeDirectionScore } from '../utils/directionPrediction';
+import { computeDirectionScore, componentsToFeatureVector } from '../utils/directionPrediction';
 import { getActivityWindow } from '../utils/sessionRegime';
 import { classifyVsaBar } from '../utils/vsaClassifier';
 import { usePredictionStore } from '../store/predictionStore';
@@ -58,8 +58,7 @@ export function usePatternDetection() {
   const predictionInputs  = useSettingsStore(s => s.predictionInputs);
   const customSpreadOverrides = useSettingsStore(s => s.customSpreadOverrides);
   const strictAsianSession = useSettingsStore(s => s.strictAsianSession);
-  const strategies = useStrategiesStore(s => s.enabled); // read for re-render on toggle changes
-  void strategies;
+  const strategies = useStrategiesStore(s => s.enabled);
   const { playBullish, playBearish } = useAudioAlert();
 
   const recordPrediction  = usePredictionStore(s => s.recordPrediction);
@@ -125,7 +124,7 @@ export function usePatternDetection() {
       ema9, ema21, rsi7, vwap,
     });
 
-    const patterns = runAllDetectors(finalizedCandles);
+    const patterns = filterByStrategyToggles(runAllDetectors(finalizedCandles), strategies);
     const last = finalizedCandles[finalizedCandles.length - 1];
 
     const htfState = useHtfContextStore.getState();
@@ -149,18 +148,18 @@ export function usePatternDetection() {
       return { high: pickHigh(frame.swings), low: pickLow(frame.swings) };
     })();
 
-    const m5Sweeps = detectLiquiditySweepReaction(
+    const m5Sweeps = filterByStrategyToggles(detectLiquiditySweepReaction(
       htfState.m5.candles,
       htfState.m5.liquidityPools,
       atr,
       htfSwings.high,
       htfSwings.low,
-    );
+    ), strategies);
     const scoredObs = scoreOrderBlocks(sm.orderBlocks, sm.fvgs, sm.bosEvents, finalizedCandles, atr, htfState.m5.liquidityPools);
     const obReactionSignals = detectStrongOrderBlockReactionWith(finalizedCandles, scoredObs, atr);
 
     // Volume-gated ICB for official scoring (uses impulseVelocity proxy on forex)
-    const icbWithVolumeGate = detectImpulseBreakout(finalizedCandles, impulseVelSeries);
+    const icbWithVolumeGate = filterByStrategyToggles(detectImpulseBreakout(finalizedCandles, impulseVelSeries), strategies);
 
     // CHoCH confirmation: state-machine waits up to MAX_WAIT_BARS for structure break
     const confirmedChoch = chochTracker.update(htfState.m5.candles, m5Sweeps, htfState.m5.swings);
@@ -258,10 +257,9 @@ export function usePatternDetection() {
   };
 
   useEffect(() => {
-    if (candlesRef.current.length < 10) return;
-
     const id = setInterval(() => {
       const cs = candlesRef.current;
+      if (cs.length < 10) return;
       const last = cs[cs.length - 1];
       if (!last) return;
 
@@ -405,10 +403,7 @@ function maybeUpdatePriorityAlert(
   let probUp: number;
   if (calibration.featureModel && components) {
     const fm = calibration.featureModel;
-    const fv = [
-      components.structure, components.zones, components.liquidity,
-      components.trigger, components.indicator, components.bos, components.macd,
-    ];
+    const fv = componentsToFeatureVector(components);
     let z = fm.bias;
     for (let i = 0; i < fm.weights.length && i < fv.length; i++) {
       z += fm.weights[i] * fv[i];
