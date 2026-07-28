@@ -1,21 +1,22 @@
 import type { Candle, Interval } from '../../types/candle';
+import { DERIV_CONFIG } from '../providers.config';
 
-const GRANULARITY_MAP: Record<Interval, number> = {
-  '1min':  60,
-  '5min':  300,
-  '15min': 900,
-  '30min': 1800,
-  '1h':    3600,
-  '4h':    14400,
-  '1day':  86400,
-};
+const {
+  granularityMap: GRANULARITY_MAP,
+  defaultCount,
+  pingIntervalMs,
+  reconnectBackoffMs: BACKOFF,
+  wsUrl: WS_URL,
+  appIdEnvVar,
+  defaultAppId,
+} = DERIV_CONFIG;
 
 function wsUrl(): string {
   // app_id must be numeric — Deriv's test app_id 1089 works for development.
   // Users can register their own at api.deriv.com/dashboard.
-  const appId = import.meta.env.VITE_DERIV_APP_ID as string | undefined;
-  const numericAppId = appId && /^\d+$/.test(appId) ? appId : '1089';
-  return `wss://ws.derivws.com/websockets/v3?app_id=${numericAppId}`;
+  const appId = import.meta.env[appIdEnvVar] as string | undefined;
+  const numericAppId = appId && /^\d+$/.test(appId) ? appId : defaultAppId;
+  return `${WS_URL}?app_id=${numericAppId}`;
 }
 
 function toDerivSymbol(symbol: string): string {
@@ -48,7 +49,7 @@ export function isDerivSupported(symbol: string): boolean {
 export async function fetchDerivCandles(
   symbol: string,
   interval: Interval,
-  count = 1000,
+  count = defaultCount,
 ): Promise<Candle[]> {
   const granularity = GRANULARITY_MAP[interval];
   const dSym = toDerivSymbol(symbol);
@@ -118,7 +119,6 @@ export async function fetchDerivCandles(
 }
 
 type TickCallback = (c: Candle) => void;
-const BACKOFF = [3000, 6000, 12000, 30000, 60000];
 
 export function subscribeDerivTicks(
   symbol: string,
@@ -154,7 +154,7 @@ export function subscribeDerivTicks(
       }));
       pingId = setInterval(() => {
         if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }));
-      }, 15_000);
+      }, pingIntervalMs);
     };
 
     ws.onmessage = (ev) => {

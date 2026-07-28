@@ -1,24 +1,17 @@
 import type { Candle, Interval } from '../../types/candle';
+import { BINANCE_CONFIG } from '../providers.config';
 
-const INTERVAL_MAP: Record<Interval, string> = {
-  '1min':  '1m',
-  '5min':  '5m',
-  '15min': '15m',
-  '30min': '30m',
-  '1h':    '1h',
-  '4h':    '4h',
-  '1day':  '1d',
-};
+const { intervalMap: INTERVAL_MAP, defaultLimit, reconnectBackoffMs: BACKOFF, requestTimeoutMs } = BINANCE_CONFIG;
 
 export async function fetchBinanceCandles(
   symbol: string,
   interval: Interval,
-  limit = 1000,
+  limit = defaultLimit,
 ): Promise<Candle[]> {
   const sym = symbol.toUpperCase().replace('/', '');
   const ivl = INTERVAL_MAP[interval];
-  const url = `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${ivl}&limit=${limit}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+  const url = `${BINANCE_CONFIG.restHosts.global}${BINANCE_CONFIG.klinesPath}?symbol=${sym}&interval=${ivl}&limit=${limit}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(requestTimeoutMs) });
   if (!res.ok) throw new Error(`Binance HTTP ${res.status}`);
   const data: unknown[][] = await res.json() as unknown[][];
   return data.map(k => ({
@@ -33,8 +26,6 @@ export async function fetchBinanceCandles(
 
 type TickCallback = (c: Candle) => void;
 
-const BACKOFF = [3000, 6000, 12000, 30000, 60000];
-
 export function subscribeBinanceTicks(
   symbol: string,
   interval: Interval,
@@ -42,7 +33,7 @@ export function subscribeBinanceTicks(
 ): () => void {
   const sym = symbol.toUpperCase().replace('/', '');
   const ivl = INTERVAL_MAP[interval];
-  const url = `wss://stream.binance.com:9443/ws/${sym.toLowerCase()}@kline_${ivl}`;
+  const url = `${BINANCE_CONFIG.wsHosts.global}/ws/${sym.toLowerCase()}@kline_${ivl}`;
 
   let ws: WebSocket | null = null;
   let attempt = 0;
