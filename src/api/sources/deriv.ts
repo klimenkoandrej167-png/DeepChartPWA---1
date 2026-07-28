@@ -122,6 +122,12 @@ export async function fetchDerivCandles(
 
 type TickCallback = (c: Candle) => void;
 
+/**
+ * Subscribe to live ticks. The demo app_id 1089 cannot subscribe to live
+ * ticks (returns InvalidSymbol), so we fall back to polling history every
+ * few seconds. A real app_id from api.deriv.com/dashboard supports live
+ * subscription via the `subscribe: 1` flag.
+ */
 export function subscribeDerivTicks(
   symbol: string,
   onTick: TickCallback,
@@ -132,8 +138,52 @@ export function subscribeDerivTicks(
 
   let ws: WebSocket | null = null;
   let pingId: ReturnType<typeof setInterval> | null = null;
+  let pollId: ReturnType<typeof setInterval> | null = null;
   let attempt = 0;
   let stopped = false;
+  let subscribed = false;
+
+  function fetchLatestCandle() {
+    if (stopped) return;
+    const pollWs = new WebSocket(wsUrl());
+    pollWs.onopen = () => {
+      pollWs.send(JSON.stringify({
+        ticks_history: dSym,
+        style: 'candles',
+        granularity,
+        count: 1,
+        end: 'latest',
+      }));
+    };
+    pollWs.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data as string) as {
+          error?: { message: string };
+          msg_type?: string;
+          candles?: { epoch: number; open: string; high: string; low: string; close: string }[];
+        };
+        if (msg.msg_type === 'candles' && msg.candles && msg.candles.length > 0) {
+          const c = msg.candles[msg.candles.length - 1];
+          onTick({
+            time:   c.epoch,
+            open:   parseFloat(c.open),
+            high:   parseFloat(c.high),
+            low:    parseFloat(c.low),
+            close:  parseFloat(c.close),
+            volume: 0,
+          });
+        }
+      } catch { /* ignore */ }
+      pollWs.close();
+    };
+    pollWs.onerror = () => { try { pollWs.close(); } catch { /* ignore */ } };
+  }
+
+  function startPolling() {
+    if (pollId || stopped) return;
+    const pollInterval = Math.max(intervalSec * 1000, 5000);
+    pollId = setInterval(fetchLatestCandle, pollInterval);
+  }
 
   function connect() {
     if (stopped) return;
@@ -163,9 +213,19 @@ export function subscribeDerivTicks(
       try {
         const msg = JSON.parse(ev.data as string) as {
           msg_type?: string;
+          error?: { message: string };
           ohlc?: { epoch: number; open_time: number; open: string; high: string; low: string; close: string };
         };
+        if (msg.error && !subscribed) {
+          // Subscribe failed (demo app_id limitation) — fall back to polling
+          if (pingId) { clearInterval(pingId); pingId = null; }
+          try { ws?.close(); } catch { /* ignore */ }
+          ws = null;
+          startPolling();
+          return;
+        }
         if (msg.msg_type === 'ohlc' && msg.ohlc) {
+          subscribed = true;
           const c = msg.ohlc;
           onTick({
             time:   Number(c.open_time),
@@ -179,10 +239,25 @@ export function subscribeDerivTicks(
       } catch { /* ignore */ }
     };
 
-    ws.onerror = () => reconnect();
+    ws.onerror = () => {
+      if (!subscribed && !pollId) {
+        // Never successfully subscribed — start polling instead of reconnecting
+        if (pingId) { clearInterval(pingId); pingId = null; }
+        try { ws?.close(); } catch { /* ignore */ }
+        ws = null;
+        startPolling();
+      } else {
+        reconnect();
+      }
+    };
+
     ws.onclose = () => {
-      if (pingId) clearInterval(pingId);
-      reconnect();
+      if (pingId) { clearInterval(pingId); pingId = null; }
+      if (!subscribed && !pollId) {
+        startPolling();
+      } else if (subscribed) {
+        reconnect();
+      }
     };
   }
 
@@ -197,6 +272,7 @@ export function subscribeDerivTicks(
   return () => {
     stopped = true;
     if (pingId) clearInterval(pingId);
-    ws?.close();
+    if (pollId) clearInterval(pollId);
+    try { ws?.close(); } catch { /* ignore */ }
   };
 }

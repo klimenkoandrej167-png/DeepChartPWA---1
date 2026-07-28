@@ -54,6 +54,33 @@ export async function fetchBinanceCandles(
 
 type TickCallback = (c: Candle) => void;
 
+async function fetchLatestCandle(
+  symbol: string,
+  interval: Interval,
+): Promise<Candle | null> {
+  await detectHosts();
+  const sym = symbol.toUpperCase().replace('/', '');
+  const ivl = INTERVAL_MAP[interval];
+  const url = `${restHostCache}${BINANCE_CONFIG.klinesPath}?symbol=${sym}&interval=${ivl}&limit=1`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(requestTimeoutMs) });
+    if (!res.ok) return null;
+    const data: unknown[][] = await res.json() as unknown[][];
+    if (!data.length) return null;
+    const k = data[0];
+    return {
+      time:   Math.floor(Number(k[0]) / 1000),
+      open:   parseFloat(k[1] as string),
+      high:   parseFloat(k[2] as string),
+      low:    parseFloat(k[3] as string),
+      close:  parseFloat(k[4] as string),
+      volume: parseFloat(k[5] as string),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function subscribeBinanceTicks(
   symbol: string,
   interval: Interval,
@@ -66,10 +93,23 @@ export function subscribeBinanceTicks(
   let attempt = 0;
   let stopped = false;
   let wsUrl = '';
+  let pollId: ReturnType<typeof setInterval> | null = null;
+  let gotWsData = false;
 
   function buildUrl(): string {
     const host = wsHostCache ?? BINANCE_CONFIG.wsHosts.global;
     return `${host}/ws/${sym.toLowerCase()}@kline_${ivl}`;
+  }
+
+  function startPolling() {
+    if (pollId || stopped) return;
+    const intervalMs = (intervalToMs(interval) ?? 60000);
+    const pollInterval = Math.max(intervalMs, 5000);
+    pollId = setInterval(async () => {
+      if (stopped) return;
+      const candle = await fetchLatestCandle(symbol, interval);
+      if (candle) onTick(candle);
+    }, pollInterval);
   }
 
   function connect() {
@@ -77,7 +117,17 @@ export function subscribeBinanceTicks(
     wsUrl = buildUrl();
     ws = new WebSocket(wsUrl);
 
+    const wsTimeout = setTimeout(() => {
+      if (!gotWsData && !stopped) {
+        try { ws?.close(); } catch { /* ignore */ }
+        ws = null;
+        startPolling();
+      }
+    }, 10_000);
+
     ws.onmessage = (ev) => {
+      gotWsData = true;
+      clearTimeout(wsTimeout);
       attempt = 0;
       try {
         const msg = JSON.parse(ev.data as string) as {
@@ -95,8 +145,25 @@ export function subscribeBinanceTicks(
       } catch { /* ignore */ }
     };
 
-    ws.onerror = () => reconnect();
-    ws.onclose = () => reconnect();
+    ws.onerror = () => {
+      clearTimeout(wsTimeout);
+      if (!gotWsData && !pollId) {
+        try { ws?.close(); } catch { /* ignore */ }
+        ws = null;
+        startPolling();
+      } else {
+        reconnect();
+      }
+    };
+
+    ws.onclose = () => {
+      clearTimeout(wsTimeout);
+      if (!gotWsData && !pollId) {
+        startPolling();
+      } else if (gotWsData) {
+        reconnect();
+      }
+    };
   }
 
   function reconnect() {
@@ -108,5 +175,22 @@ export function subscribeBinanceTicks(
 
   detectHosts().then(connect);
 
-  return () => { stopped = true; ws?.close(); };
+  return () => {
+    stopped = true;
+    if (pollId) clearInterval(pollId);
+    try { ws?.close(); } catch { /* ignore */ }
+  };
+}
+
+function intervalToMs(interval: Interval): number {
+  const map: Record<Interval, number> = {
+    '1min': 60_000,
+    '5min': 300_000,
+    '15min': 900_000,
+    '30min': 1_800_000,
+    '1h': 3_600_000,
+    '4h': 14_400_000,
+    '1day': 86_400_000,
+  };
+  return map[interval];
 }
