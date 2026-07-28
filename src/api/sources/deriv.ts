@@ -7,16 +7,18 @@ const {
   pingIntervalMs,
   reconnectBackoffMs: BACKOFF,
   wsUrl: WS_URL,
-  appIdEnvVar,
-  defaultAppId,
 } = DERIV_CONFIG;
 
-function wsUrl(): string {
+function resolveAppId(): string {
   // app_id must be numeric — Deriv's test app_id 1089 works for development.
   // Users can register their own at api.deriv.com/dashboard.
-  const appId = import.meta.env[appIdEnvVar] as string | undefined;
-  const numericAppId = appId && /^\d+$/.test(appId) ? appId : defaultAppId;
-  return `${WS_URL}?app_id=${numericAppId}`;
+  const env = import.meta.env;
+  const appId = env[DERIV_CONFIG.appIdEnvVar as 'VITE_DERIV_APP_ID'] as string | undefined;
+  return appId && /^\d+$/.test(appId) ? appId : DERIV_CONFIG.defaultAppId;
+}
+
+function wsUrl(): string {
+  return `${WS_URL}?app_id=${resolveAppId()}`;
 }
 
 function toDerivSymbol(symbol: string): string {

@@ -3,14 +3,42 @@ import { BINANCE_CONFIG } from '../providers.config';
 
 const { intervalMap: INTERVAL_MAP, defaultLimit, reconnectBackoffMs: BACKOFF, requestTimeoutMs } = BINANCE_CONFIG;
 
+let restHostCache: string | null = null;
+let wsHostCache: string | null = null;
+let detecting: Promise<void> | null = null;
+
+async function detectHosts(): Promise<void> {
+  if (restHostCache && wsHostCache) return;
+  if (detecting) return detecting;
+  detecting = (async () => {
+    for (const variant of ['global', 'us'] as const) {
+      const rest = BINANCE_CONFIG.restHosts[variant];
+      try {
+        const res = await fetch(`${rest}${BINANCE_CONFIG.pingPath}`, {
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok) {
+          restHostCache = rest;
+          wsHostCache = BINANCE_CONFIG.wsHosts[variant];
+          return;
+        }
+      } catch { /* try next */ }
+    }
+    restHostCache = BINANCE_CONFIG.restHosts.global;
+    wsHostCache = BINANCE_CONFIG.wsHosts.global;
+  })();
+  return detecting;
+}
+
 export async function fetchBinanceCandles(
   symbol: string,
   interval: Interval,
   limit = defaultLimit,
 ): Promise<Candle[]> {
+  await detectHosts();
   const sym = symbol.toUpperCase().replace('/', '');
   const ivl = INTERVAL_MAP[interval];
-  const url = `${BINANCE_CONFIG.restHosts.global}${BINANCE_CONFIG.klinesPath}?symbol=${sym}&interval=${ivl}&limit=${limit}`;
+  const url = `${restHostCache}${BINANCE_CONFIG.klinesPath}?symbol=${sym}&interval=${ivl}&limit=${limit}`;
   const res = await fetch(url, { signal: AbortSignal.timeout(requestTimeoutMs) });
   if (!res.ok) throw new Error(`Binance HTTP ${res.status}`);
   const data: unknown[][] = await res.json() as unknown[][];
@@ -33,15 +61,21 @@ export function subscribeBinanceTicks(
 ): () => void {
   const sym = symbol.toUpperCase().replace('/', '');
   const ivl = INTERVAL_MAP[interval];
-  const url = `${BINANCE_CONFIG.wsHosts.global}/ws/${sym.toLowerCase()}@kline_${ivl}`;
 
   let ws: WebSocket | null = null;
   let attempt = 0;
   let stopped = false;
+  let wsUrl = '';
+
+  function buildUrl(): string {
+    const host = wsHostCache ?? BINANCE_CONFIG.wsHosts.global;
+    return `${host}/ws/${sym.toLowerCase()}@kline_${ivl}`;
+  }
 
   function connect() {
     if (stopped) return;
-    ws = new WebSocket(url);
+    wsUrl = buildUrl();
+    ws = new WebSocket(wsUrl);
 
     ws.onmessage = (ev) => {
       attempt = 0;
@@ -72,6 +106,7 @@ export function subscribeBinanceTicks(
     setTimeout(connect, delay);
   }
 
-  connect();
+  detectHosts().then(connect);
+
   return () => { stopped = true; ws?.close(); };
 }
