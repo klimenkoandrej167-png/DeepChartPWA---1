@@ -26,22 +26,22 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
         runtimeCaching: [
           {
+            urlPattern: /^https:\/\/.*\.supabase\.co\/functions\/v1\/market-data/,
+            handler: 'NetworkFirst',
+            options: { networkTimeoutSeconds: 15 },
+          },
+          {
+            urlPattern: /^https:\/\/api\.binance\.(com|us)\//,
+            handler: 'NetworkFirst',
+            options: { networkTimeoutSeconds: 10 },
+          },
+          {
             urlPattern: /^https:\/\/api\.twelvedata\.com\//,
             handler: 'NetworkFirst',
             options: { networkTimeoutSeconds: 10 },
           },
           {
-            urlPattern: /^https:\/\/api\.binance\.com\//,
-            handler: 'NetworkFirst',
-            options: { networkTimeoutSeconds: 10 },
-          },
-          {
             urlPattern: /^https:\/\/finnhub\.io\//,
-            handler: 'NetworkFirst',
-            options: { networkTimeoutSeconds: 10 },
-          },
-          {
-            urlPattern: /^https:\/\/query1\.finance\.yahoo\.com\//,
             handler: 'NetworkFirst',
             options: { networkTimeoutSeconds: 10 },
           },

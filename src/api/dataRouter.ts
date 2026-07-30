@@ -2,6 +2,7 @@ import type { Candle, DataSourceName, Interval } from '../types/candle';
 import { isCrypto } from '../utils/symbolUtils';
 import { intervalToMs } from '../utils/timeframeUtils';
 
+import { fetchProxyCandles, subscribeProxyTicks } from './sources/proxy';
 import { fetchBinanceCandles, subscribeBinanceTicks } from './sources/binance';
 import { fetchDerivCandles, subscribeDerivTicks, isDerivSupported } from './sources/deriv';
 import { fetchTwelvedataCandles, subscribeTwelvedataTicks } from './sources/twelvedata';
@@ -35,8 +36,15 @@ export async function selectDataSource(args: SelectArgs): Promise<DataRouter> {
 
   const chain: ChainEntry[] = [];
 
+  // Edge function proxy is always first — it runs server-side and bypasses
+  // all CORS, geo-blocking, and WebSocket limitations.
+  chain.push({
+    name: 'binance', // reported name doesn't matter much; proxy aggregates all sources
+    fetch: () => fetchProxyCandles(symbol, interval, INITIAL_CANDLE_COUNT),
+    sub: (cb) => subscribeProxyTicks(symbol, interval, cb),
+  });
+
   if (isCrypto(symbol)) {
-    // Crypto: Binance is the primary source, Deriv as fallback for pairs it supports
     chain.push({
       name: 'binance',
       fetch: () => fetchBinanceCandles(symbol, interval, INITIAL_CANDLE_COUNT),
@@ -51,7 +59,6 @@ export async function selectDataSource(args: SelectArgs): Promise<DataRouter> {
       });
     }
   } else {
-    // Forex / metals / stocks — Deriv is the primary source for pairs it supports
     if (isDerivSupported(symbol)) {
       chain.push({
         name: 'deriv',
