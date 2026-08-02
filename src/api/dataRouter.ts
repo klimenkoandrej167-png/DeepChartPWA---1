@@ -8,6 +8,7 @@ import { fetchDerivCandles, subscribeDerivTicks, isDerivSupported } from './sour
 import { fetchTwelvedataCandles, subscribeTwelvedataTicks } from './sources/twelvedata';
 import { fetchFinnhubCandles, subscribeFinnhubTicks } from './sources/finnhub';
 import { fetchYahooCandles } from './sources/yahoofinance';
+import { fetchProxyCandles, subscribeProxyTicks } from './sources/proxy';
 
 export interface DataRouter {
   sourceName: DataSourceName;
@@ -30,11 +31,20 @@ interface ChainEntry {
 
 const INITIAL_CANDLE_COUNT = 1000;
 
+/** Max time to wait for a fresh network response before falling back to cache */
+const FRESH_FETCH_TIMEOUT_MS = 2500;
+
+function isSupabaseConfigured(): boolean {
+  const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
+  const key = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+  return !!(url && key && url.trim().length > 0 && key.trim().length > 0);
+}
+
 /**
  * Build the fallback chain for a given symbol.
  *
- * Crypto:  Binance → Deriv (if the pair is quoted there)
- * Forex:   Deriv → TwelveData → Finnhub → Yahoo
+ * Crypto:  Binance → Deriv (if quoted) → Proxy (if Supabase configured)
+ * Forex:   Deriv → TwelveData → Finnhub → Yahoo → Proxy (if Supabase configured)
  */
 function buildChain(args: SelectArgs): ChainEntry[] {
   const { symbol, interval, twelvedataKey, finnhubKey } = args;
@@ -87,6 +97,17 @@ function buildChain(args: SelectArgs): ChainEntry[] {
     });
   }
 
+  // Server-side proxy as last resort fallback for both crypto and forex.
+  // Only included if Supabase env vars are configured — avoids 404s in
+  // environments where the edge function isn't deployed.
+  if (isSupabaseConfigured()) {
+    chain.push({
+      name: 'proxy',
+      fetch: () => fetchProxyCandles(symbol, interval, INITIAL_CANDLE_COUNT),
+      sub: (cb) => subscribeProxyTicks(symbol, interval, cb),
+    });
+  }
+
   return chain;
 }
 
@@ -96,30 +117,62 @@ export async function selectDataSource(args: SelectArgs): Promise<DataRouter> {
 
   // Try cache first — instant load if available and fresh
   const cached = await loadCachedCandles(symbol, interval);
+
   if (cached && cached.length > 0) {
-    // Return cached data immediately, but still try to fetch fresh in background
-    // to update the cache. Use the first source in the chain for live subscription.
+    // Race a fresh fetch against a short timeout. If the network responds
+    // in time, use fresh data. If not, use cache instantly for fast paint.
+    // The same fetch promise is reused — no double network request.
     const firstSource = chain[0];
     if (firstSource) {
-      // Kick off background refresh
-      firstSource.fetch().then(fresh => {
-        if (fresh.length > 0) saveCachedCandles(symbol, interval, fresh);
-      }).catch(() => { /* cache is still valid for now */ });
+      // Kick off ONE fetch promise. Race it against the timeout.
+      // If it resolves in time → fresh data. If it times out → cache.
+      // Either way, the promise continues in background to update cache.
+      const freshPromise = firstSource.fetch();
+
+      try {
+        const fresh = await Promise.race([
+          freshPromise,
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('cache-timeout')), FRESH_FETCH_TIMEOUT_MS),
+          ),
+        ]);
+
+        if (fresh && fresh.length > 0) {
+          saveCachedCandles(symbol, interval, fresh);
+          return {
+            sourceName: firstSource.name,
+            fetchInitialCandles: () => Promise.resolve(fresh),
+            subscribeTicks: (cb) => firstSource.sub(cb),
+          };
+        }
+      } catch {
+        // Fresh fetch didn't complete in time — use cache for instant paint.
+        // The freshPromise continues in background and updates cache for next load.
+        freshPromise.then(fresh => {
+          if (fresh && fresh.length > 0) saveCachedCandles(symbol, interval, fresh);
+        }).catch(() => { /* cache stays as-is */ });
+      }
+
+      return {
+        sourceName: firstSource.name,
+        fetchInitialCandles: () => Promise.resolve(cached),
+        subscribeTicks: (cb) => firstSource.sub(cb),
+      };
     }
 
+    // No chain sources available — return cache alone
     return {
-      sourceName: chain[0]?.name ?? 'binance',
+      sourceName: 'proxy',
       fetchInitialCandles: () => Promise.resolve(cached),
-      subscribeTicks: (cb) => chain[0]?.sub(cb) ?? (() => () => {}),
+      subscribeTicks: () => () => { /* no live source */ },
     };
   }
 
-  // No cache — try each source in the fallback chain
+  // No cache — try each source in the fallback chain sequentially
   for (const source of chain) {
     try {
       const candles = await source.fetch();
       if (candles.length > 0) {
-        // Save to cache for next load
         saveCachedCandles(symbol, interval, candles);
         return {
           sourceName: source.name,

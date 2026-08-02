@@ -1,3 +1,5 @@
+import { FEATURE_VECTOR_KEYS } from './directionPrediction';
+
 export interface FeatureSample {
   features: number[];
   actualUp: boolean;
@@ -11,7 +13,12 @@ export interface FeatureModel {
 
 export const MIN_FEATURE_SAMPLES = 60;
 const L2_LAMBDA = 0.01;
-const FEATURE_NAMES = ['structure', 'zones', 'liquidity', 'trigger', 'indicator', 'bos', 'macd'];
+
+/**
+ * Single source of truth for feature names — imported from directionPrediction.ts
+ * so it always matches the feature vector produced by componentsToFeatureVector().
+ */
+const FEATURE_NAMES: string[] = [...FEATURE_VECTOR_KEYS];
 
 export function featureNames(): string[] {
   return FEATURE_NAMES;

@@ -75,6 +75,14 @@ async function fetchBinanceCandles(symbol: string, interval: string, limit: numb
   throw new Error("Binance: no data from any host");
 }
 
+function derivWsUrl(): string {
+  // Read app_id from edge function environment variable (configured in Supabase
+  // dashboard under Edge Function secrets as DERIV_APP_ID). Falls back to the
+  // public demo 1089 only if the secret is not set.
+  const appId = Deno.env.get("DERIV_APP_ID") ?? "1089";
+  return `wss://ws.derivws.com/websockets/v3?app_id=${appId}`;
+}
+
 async function fetchDerivCandles(symbol: string, interval: string, count: number): Promise<Candle[]> {
   const dSym = toDerivSymbol(symbol);
   const granularity = DERIV_GRANULARITIES[interval] ?? 3600;
@@ -82,7 +90,7 @@ async function fetchDerivCandles(symbol: string, interval: string, count: number
   return new Promise((resolve, reject) => {
     let ws: WebSocket;
     try {
-      ws = new WebSocket("wss://ws.derivws.com/websockets/v3?app_id=1089");
+      ws = new WebSocket(derivWsUrl());
     } catch (e) {
       reject(e as Error);
       return;

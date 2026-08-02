@@ -15,7 +15,7 @@ export interface Tick {
 
 export type SourceStatus = 'connecting' | 'live' | 'error' | 'offline';
 
-export type DataSourceName = 'binance' | 'deriv' | 'twelvedata' | 'finnhub' | 'yahoo';
+export type DataSourceName = 'binance' | 'deriv' | 'twelvedata' | 'finnhub' | 'yahoo' | 'proxy';
 
 export type Interval =
   | '1min' | '5min' | '15min' | '30min'
