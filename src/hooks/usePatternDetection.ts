@@ -3,42 +3,24 @@ import { useChartStore } from '../store/chartStore';
 import { useIndicatorStore } from '../store/indicatorStore';
 import { useSignalStore } from '../store/signalStore';
 import { useSettingsStore } from '../store/settingsStore';
-import { useStrategiesStore, filterByStrategyToggles } from '../store/strategiesStore';
+import { useStrategiesStore } from '../store/strategiesStore';
 import { useAudioAlert } from './useAudioAlert';
-import { runAllDetectors } from '../patterns/index';
 import { intervalToMs } from '../utils/timeframeUtils';
-import { calcEMA } from '../indicators/ema';
-import { calcRSI } from '../indicators/rsi';
-import { calcATR } from '../indicators/atr';
-import { calcMACD } from '../indicators/macd';
-import { calcBollingerBands } from '../indicators/bollingerBands';
-import { calcFibonacci } from '../indicators/fibonacci';
-import { calcVWAP } from '../indicators/vwap';
-import { calcImpulseVelocity, calcImpulseVelocitySeries } from '../utils/impulseVelocity';
-import { detectSwings } from '../indicators/trendStructure';
-import { calcSupportResistance } from '../indicators/supportResistance';
-import { calcSmartMoney } from '../indicators/superOrderBlock';
-import { computeDirectionScore, componentsToFeatureVector } from '../utils/directionPrediction';
-import { getActivityWindow } from '../utils/sessionRegime';
-import { classifyVsaBar } from '../utils/vsaClassifier';
 import { usePredictionStore } from '../store/predictionStore';
 import { useHtfContextStore } from '../store/htfContextStore';
 import { usePriorityAlertStore } from '../store/priorityAlertStore';
-import { detectLiquiditySweepReaction } from '../patterns/advanced/liquiditySweepReaction';
-import { detectImpulseBreakout } from '../patterns/advanced/impulseBreakout';
 import { calibratedProbability, sigmoid } from '../utils/calibration';
 import { computeRecommendedExpirySeconds } from '../utils/recommendedExpiry';
 import { estimateTradeLevels } from '../utils/tradeLevels';
-import { scoreOrderBlocks } from '../utils/orderBlockStrength';
-import { detectStrongOrderBlockReactionWith } from '../patterns/advanced/strongOrderBlockReaction';
 import { detectLevelReactions } from '../patterns/levels/levelReaction';
 import { estimateSpread } from '../utils/spreadEstimate';
 import { getCurrentSession } from '../utils/marketHours';
 import { isCrypto } from '../utils/symbolUtils';
+import { componentsToFeatureVector } from '../utils/directionPrediction';
 import { useSweepChochTracker } from './useSweepChochTracker';
+import { runEngine } from '../engine/analysisEngine';
 import type { Candle } from '../types/candle';
 import type { PatternResult } from '../types/pattern';
-import type { SwingPoint } from '../store/indicatorStore';
 
 const PRE_CLOSE_TRIGGER_SECONDS = 5;
 const LIGHT_ANALYSIS_INTERVAL_MS = 2000;
@@ -86,85 +68,34 @@ export function usePatternDetection() {
   const analysisRef = useRef<(c: Candle[], preClose: boolean) => void>(null!);
 
   analysisRef.current = (finalizedCandles: Candle[], isPreClose: boolean) => {
-    const closes = finalizedCandles.map(c => c.close);
-    const highs  = finalizedCandles.map(c => c.high);
-    const lows   = finalizedCandles.map(c => c.low);
-
-    const ema20  = calcEMA(closes, 20);
-    const ema50  = calcEMA(closes, 50);
-    const ema200 = calcEMA(closes, 200);
-    const rsi    = calcRSI(closes);
-    const atr    = calcATR(finalizedCandles);
-    const macd   = calcMACD(closes);
-    const bb     = calcBollingerBands(closes);
-    const fib    = calcFibonacci(highs, lows);
-    const swings = detectSwings(highs, lows);
-    const srLevels = calcSupportResistance(highs, lows, 100, closes[closes.length - 1]);
-    const sm     = calcSmartMoney(finalizedCandles);
-
-    const ema9  = calcEMA(closes, 9);
-    const ema21 = calcEMA(closes, 21);
-    const rsi7  = calcRSI(closes, 7);
-    const vwap  = calcVWAP(finalizedCandles);
-    const impulseVel = calcImpulseVelocity(finalizedCandles);
-    const impulseVelSeries = calcImpulseVelocitySeries(finalizedCandles);
-
-    setValues({
-      ema20, ema50, ema200,
-      rsi, atr,
-      macd: { macd: macd.macd, signal: macd.signal, hist: macd.hist },
-      bb:   { upper: bb.upper, middle: bb.middle, lower: bb.lower },
-      fibLevels: fib.levels.map(l => l.price),
-      swings,
-      srLevels,
-      orderBlocks:     sm.orderBlocks,
-      fvgs:            sm.fvgs,
-      rejectionBlocks: sm.rejectionBlocks,
-      bosEvents:       sm.bosEvents,
-      ema9, ema21, rsi7, vwap,
-    });
-
-    const patterns = filterByStrategyToggles(runAllDetectors(finalizedCandles), strategies);
-    const last = finalizedCandles[finalizedCandles.length - 1];
-
     const htfState = useHtfContextStore.getState();
 
-    // HTF swings (priority H1, fallback M15) for hour-scale liquidity sweep detection
-    const htfSwings: { high?: number; low?: number } = (() => {
-      const pickHigh = (swings: SwingPoint[]): number | undefined => {
-        for (let i = swings.length - 1; i >= 0; i--) {
-          if (swings[i].type === 'HH' || swings[i].type === 'LH') return swings[i].price;
-        }
-        return undefined;
-      };
-      const pickLow = (swings: SwingPoint[]): number | undefined => {
-        for (let i = swings.length - 1; i >= 0; i--) {
-          if (swings[i].type === 'HL' || swings[i].type === 'LL') return swings[i].price;
-        }
-        return undefined;
-      };
-      const h1HasSwings = htfState.h1.swings.length > 0;
-      const frame = h1HasSwings ? htfState.h1 : htfState.m15;
-      return { high: pickHigh(frame.swings), low: pickLow(frame.swings) };
-    })();
+    const result = runEngine({
+      candles: finalizedCandles,
+      symbol,
+      interval,
+      predictionInputs,
+      strategies,
+      htf: { h1: htfState.h1, m15: htfState.m15, m5: htfState.m5 },
+      levelSignals: levelSignalsThisCandleRef.current,
+    });
 
-    const m5Sweeps = filterByStrategyToggles(detectLiquiditySweepReaction(
+    // CHoCH tracker is stateful and depends on real-time m5 sweeps.
+    // Feed it the m5 sweeps from the engine output, then pass confirmed
+    // CHoCH signals into the signal dispatch pipeline.
+    const confirmedChoch = chochTracker.update(
       htfState.m5.candles,
-      htfState.m5.liquidityPools,
-      atr,
-      htfSwings.high,
-      htfSwings.low,
-    ), strategies);
-    const scoredObs = scoreOrderBlocks(sm.orderBlocks, sm.fvgs, sm.bosEvents, finalizedCandles, atr, htfState.m5.liquidityPools);
-    const obReactionSignals = detectStrongOrderBlockReactionWith(finalizedCandles, scoredObs, atr);
+      result.m5Sweeps,
+      htfState.m5.swings,
+    );
 
-    // Volume-gated ICB for official scoring (uses impulseVelocity proxy on forex)
-    const icbWithVolumeGate = filterByStrategyToggles(detectImpulseBreakout(finalizedCandles, impulseVelSeries), strategies);
+    setValues(result.indicators);
 
-    // CHoCH confirmation: state-machine waits up to MAX_WAIT_BARS for structure break
-    const confirmedChoch = chochTracker.update(htfState.m5.candles, m5Sweeps, htfState.m5.swings);
-
-    const allSignalsForDispatch = [...patterns, ...obReactionSignals, ...confirmedChoch];
+    const allSignalsForDispatch = [
+      ...result.patterns,
+      ...result.obReactionSignals,
+      ...confirmedChoch,
+    ];
     const newSignals = allSignalsForDispatch.filter(p => {
       const k = `${p.type}_${p.index}`;
       if (lastPatternsRef.current.has(k)) return false;
@@ -173,14 +104,14 @@ export function usePatternDetection() {
     });
 
     for (const p of newSignals) {
-      if (p.confidence < CLOSE_WINDOW_MIN_CONFIDENCE) continue; // gate display only
+      if (p.confidence < CLOSE_WINDOW_MIN_CONFIDENCE) continue;
       const id = `${p.type}_${p.index}_${Date.now()}`;
       const signal = {
         id,
         pattern:    p,
         symbol,
         interval,
-        candleTime: finalizedCandles[p.index]?.time ?? last.time,
+        candleTime: finalizedCandles[p.index]?.time ?? result.lastCandle.time,
         createdAt:  Date.now(),
         preClose:   isPreClose,
       };
@@ -191,68 +122,29 @@ export function usePatternDetection() {
       }
     }
 
-    const volumeAvailable = finalizedCandles.slice(-20).some(c => c.volume > 0);
-
-    let volumeSpikeRatio: number | null = null;
-    if (volumeAvailable) {
-      const recent = finalizedCandles.slice(-21, -1);
-      const avgVol = recent.reduce((s, c) => s + c.volume, 0) / (recent.length || 1);
-      volumeSpikeRatio = avgVol > 0 ? last.volume / avgVol : null;
-    }
-
-    // VSA classification of the current bar — only meaningful where volume is real (crypto)
-    const recentForVsa = finalizedCandles.slice(-21, -1);
-    const avgVolumeForVsa = recentForVsa.reduce((s, c) => s + c.volume, 0) / (recentForVsa.length || 1);
-    const avgRangeForVsa = recentForVsa.reduce((s, c) => s + (c.high - c.low), 0) / (recentForVsa.length || 1);
-    const vsaSignal = volumeAvailable ? classifyVsaBar(last, avgVolumeForVsa, avgRangeForVsa) : undefined;
-
-    // Session router: crypto has no session concept → disabled (undefined)
-    const activityWindow = isCrypto(symbol) ? undefined : getActivityWindow();
-
-    const patternsWithoutICB = patterns.filter(p => p.type !== 'impulse_consolidation_breakout');
-    const allRecent = [
-      ...patternsWithoutICB.slice(0, 5),
-      ...icbWithVolumeGate.slice(-2),
-      ...m5Sweeps.slice(-3),
-      ...obReactionSignals.slice(-2),
-      ...confirmedChoch,
-      ...levelSignalsThisCandleRef.current.slice(-3),
-    ];
-    levelSignalsThisCandleRef.current = [];
-
-    const { score, components } = computeDirectionScore({
-      recentSignals: allRecent,
-      ema9, ema21, rsi7,
-      macdHist: macd.hist,
-      bosEvents: sm.bosEvents,
-      vwap,
-      lastPrice: last.close,
-      predictionInputs,
-      htf: { h1: htfState.h1, m15: htfState.m15, m5: htfState.m5 },
-      volumeAvailable,
-      volumeSpikeRatio,
-      impulseVelocity: impulseVel,
-      atr,
-      activityWindow,
-      vsaSignal,
-    });
-
-    recordPrediction({ symbol, interval, candleTime: last.time, score, priceAtPrediction: last.close, components });
-
-    maybeUpdatePriorityAlert(
-      score,
+    recordPrediction({
       symbol,
       interval,
-      last.close,
-      allRecent,
+      candleTime: result.lastCandle.time,
+      score: result.directionScore,
+      priceAtPrediction: result.lastPrice,
+      components: result.components,
+    });
+
+    maybeUpdatePriorityAlert(
+      result.directionScore,
+      symbol,
+      interval,
+      result.lastPrice,
+      result.allRecent,
       htfState,
-      atr,
+      result.indicators.atr,
       soundEnabled,
       playBullish,
       playBearish,
       customSpreadOverrides,
       strictAsianSession,
-      components,
+      result.components,
     );
   };
 
@@ -282,7 +174,6 @@ export function usePatternDetection() {
     return () => clearInterval(id);
   }, [interval, symbol, resolvePrediction]);
 
-  // Light analysis pass — every 2s, uses only cached store values (no heavy recomputation)
   useEffect(() => {
     const id = setInterval(() => {
       const cs = candlesRef.current;
@@ -312,7 +203,6 @@ export function usePatternDetection() {
         if (lastPatternsRef.current.has(k)) continue;
         lastPatternsRef.current.add(k);
 
-        // Always feed scoring data; the close-window gate filters display/history only
         levelSignalsThisCandleRef.current.push(p);
         if (levelSignalsThisCandleRef.current.length > 20) levelSignalsThisCandleRef.current.shift();
 
@@ -383,12 +273,10 @@ function maybeUpdatePriorityAlert(
   strictAsianSession: boolean,
   components?: import('../utils/directionPrediction').DirectionResult['components'],
 ) {
-  // --- Session filter (Step 7) ---
   if (!isCrypto(symbol)) {
     const session = getCurrentSession();
     if (session === 'closed') return;
 
-    // Raise threshold during Tokyo session for non-Asian pairs
     if (strictAsianSession && session === 'tokyo') {
       const upper = symbol.toUpperCase().replace('/', '');
       const isAsianPair = upper.includes('JPY') || upper === 'AUDUSD' || upper === 'NZDUSD';
@@ -420,8 +308,6 @@ function maybeUpdatePriorityAlert(
 
   const direction: 'up' | 'down' = score > 0 ? 'up' : 'down';
 
-  // --- EV / RR filter (Step 2) ---
-  // Use native pattern levels (measured-move based) when the trigger pattern provides them
   const triggerPattern = recentSignals.find(p => p.type === 'impulse_consolidation_breakout' && p.extra?.sl !== undefined && p.extra?.tp1 !== undefined);
   const nativeLevels = triggerPattern?.extra
     ? { sl: triggerPattern.extra.sl as number, tp: triggerPattern.extra.tp1 as number }
@@ -433,7 +319,6 @@ function maybeUpdatePriorityAlert(
   const evPct = ev / lastPrice;
   if (evPct <= 0) return;
 
-  // --- Spread gate (Step 3) ---
   const spread = estimateSpread(symbol, lastPrice, customSpreadOverrides);
   if (levels.rewardDistance < spread * MIN_REWARD_TO_SPREAD) return;
 

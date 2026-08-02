@@ -3,31 +3,8 @@ import { useChartStore } from '../store/chartStore';
 import { useKeysStore } from '../store/keysStore';
 import { useHtfContextStore, HTF_INTERVAL_MAP, type HtfTf } from '../store/htfContextStore';
 import { selectDataSource } from '../api/dataRouter';
-import { calcEMA } from '../indicators/ema';
-import { detectSwings } from '../indicators/trendStructure';
-import { calcSupportResistance } from '../indicators/supportResistance';
-import { calcSmartMoney } from '../indicators/superOrderBlock';
-import { calcVolumeProfile } from '../indicators/volumeProfile';
-import { detectLiquidityPools } from '../indicators/liquidityPools';
+import { computeFrameData } from '../engine/frameEngine';
 import type { Candle } from '../types/candle';
-
-function computeFrameData(candles: Candle[], symbol: string) {
-  if (candles.length < 10) return null;
-
-  const closes = candles.map(c => c.close);
-  const highs  = candles.map(c => c.high);
-  const lows   = candles.map(c => c.low);
-
-  const ema20 = calcEMA(closes, 20);
-  const ema50 = calcEMA(closes, 50);
-  const swings = detectSwings(highs, lows);
-  const srLevels = calcSupportResistance(highs, lows, 100, closes[closes.length - 1]);
-  const sm = calcSmartMoney(candles);
-  const volumeProfile = calcVolumeProfile(candles, symbol);
-  const liquidityPools = detectLiquidityPools(candles);
-
-  return { ema20, ema50, swings, srLevels, ...sm, volumeProfile, liquidityPools };
-}
 
 export function useHtfContext() {
   const symbol = useChartStore(s => s.symbol);
