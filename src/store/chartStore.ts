@@ -46,7 +46,9 @@ export const useChartStore = create<ChartState>()((set) => ({
           high:   Math.max(last.high, c.high),
           low:    Math.min(last.low, c.low),
           close:  c.close,
-          volume: c.volume ?? last.volume ?? 0,
+          // Volume is cumulative per-candle (Binance) or always 0 (Deriv).
+          // Take the latest value — do NOT sum with last.volume.
+          volume: c.volume,
         };
         const next = [...arr];
         next[next.length - 1] = merged;

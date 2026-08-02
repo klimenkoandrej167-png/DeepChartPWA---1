@@ -1,5 +1,6 @@
 import type { Candle, Interval } from '../../types/candle';
 import { DERIV_CONFIG } from '../providers.config';
+import { isCrypto } from '../../utils/symbolUtils';
 
 const {
   granularityMap: GRANULARITY_MAP,
@@ -9,44 +10,59 @@ const {
   wsUrl: WS_URL,
 } = DERIV_CONFIG;
 
+/**
+ * Resolve the Deriv app_id from the environment.
+ *
+ * CRITICAL: Do NOT validate with a regex like /^\d+$/ — modern Deriv app_ids
+ * can be alphanumeric. Pass VITE_DERIV_APP_ID through as-is. The only
+ * fallback is when the variable is unset (undefined/empty): use 1089.
+ */
 function resolveAppId(): string {
-  // app_id must be numeric — Deriv's test app_id 1089 works for development.
-  // Users can register their own at api.deriv.com/dashboard.
-  const env = import.meta.env;
-  const appId = env[DERIV_CONFIG.appIdEnvVar as 'VITE_DERIV_APP_ID'] as string | undefined;
-  return appId && /^\d+$/.test(appId) ? appId : DERIV_CONFIG.defaultAppId;
+  const raw = import.meta.env.VITE_DERIV_APP_ID as string | undefined;
+  if (raw && raw.trim().length > 0) return raw.trim();
+  return DERIV_CONFIG.defaultAppId;
+}
+
+/** Optional Deriv token — only needed for account data, not for public candles */
+function resolveToken(): string | null {
+  const raw = import.meta.env.VITE_DERIV_TOKEN as string | undefined;
+  if (raw && raw.trim().length > 0) return raw.trim();
+  return null;
 }
 
 function wsUrl(): string {
   return `${WS_URL}?app_id=${resolveAppId()}`;
 }
 
-function toDerivSymbol(symbol: string): string {
+/** Map a user-facing symbol to Deriv's internal symbol format */
+export function toDerivSymbol(symbol: string): string {
   const upper = symbol.toUpperCase().replace('/', '');
-  // Forex pairs (6 chars) use the frx prefix
-  if (upper.length === 6) return `frx${upper}`;
-  // Crypto pairs: convert e.g. BTCUSDT → cryBTCUSD, ETHUSDT → cryETHUSD
-  for (const quote of ['USDT', 'BUSD']) {
-    if (upper.endsWith(quote)) {
-      return `cry${upper.slice(0, -quote.length)}USD`;
+  if (isCrypto(symbol)) {
+    for (const quote of ['USDT', 'BUSD']) {
+      if (upper.endsWith(quote)) return `cry${upper.slice(0, -quote.length)}USD`;
     }
+    if (upper.endsWith('USD')) return `cry${upper}`;
+    return upper;
   }
-  if (upper.endsWith('USD')) return `cry${upper}`;
+  // Forex/metals (6-letter pairs) use the frx prefix
+  if (upper.length === 6) return `frx${upper}`;
   return upper;
 }
 
-/** Deriv covers forex majors/crosses/metals (6-letter pairs via frx prefix) and crypto (e.g. BTCUSD) */
+/** Deriv covers forex majors/crosses/metals (6-letter pairs via frx prefix) and some crypto */
 export function isDerivSupported(symbol: string): boolean {
   const upper = symbol.toUpperCase().replace('/', '');
-  // Forex pairs (e.g. EURUSD, GBPJPY, XAUUSD) — 6 chars
   if (upper.length === 6) return true;
-  // Crypto pairs without USDT suffix (e.g. BTCUSD, ETHUSD) — Deriv uses crypto base + USD
-  // Strip common quote currencies to check if the base is a known crypto
-  for (const quote of ['USDT', 'USD', 'BUSD', 'EUR', 'GBP']) {
-    if (upper.endsWith(quote) && upper.length > quote.length) return true;
+  if (isCrypto(symbol)) {
+    for (const quote of ['USDT', 'USD', 'BUSD']) {
+      if (upper.endsWith(quote) && upper.length > quote.length) return true;
+    }
   }
   return false;
 }
+
+let reqIdCounter = 1;
+function nextReqId(): number { return reqIdCounter++; }
 
 export async function fetchDerivCandles(
   symbol: string,
@@ -55,6 +71,7 @@ export async function fetchDerivCandles(
 ): Promise<Candle[]> {
   const granularity = GRANULARITY_MAP[interval];
   const dSym = toDerivSymbol(symbol);
+  const reqId = nextReqId();
 
   return new Promise((resolve, reject) => {
     let ws: WebSocket;
@@ -77,12 +94,14 @@ export async function fetchDerivCandles(
         granularity,
         count,
         end: 'latest',
+        req_id: reqId,
       }));
     };
 
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data as string) as {
+          req_id?: number;
           error?: { message: string };
           msg_type?: string;
           candles?: { epoch: number; open: string; high: string; low: string; close: string }[];
@@ -101,7 +120,7 @@ export async function fetchDerivCandles(
             high:   parseFloat(c.high),
             low:    parseFloat(c.low),
             close:  parseFloat(c.close),
-            volume: 0,
+            volume: 0, // forex/metals always have volume 0 on Deriv
           }));
           ws.close();
           resolve(candles);
@@ -123,10 +142,12 @@ export async function fetchDerivCandles(
 type TickCallback = (c: Candle) => void;
 
 /**
- * Subscribe to live ticks. The demo app_id 1089 cannot subscribe to live
- * ticks (returns InvalidSymbol), so we fall back to polling history every
- * few seconds. A real app_id from api.deriv.com/dashboard supports live
- * subscription via the `subscribe: 1` flag.
+ * Subscribe to live OHLC updates from Deriv via a single WebSocket.
+ *
+ * Reconnect logic: onerror and onclose both fire on disconnect. A single
+ * `reconnecting` flag ensures reconnect() runs exactly once per break.
+ * After reconnect, the subscription is re-sent (Deriv forgets subscriptions
+ * on socket disconnect).
  */
 export function subscribeDerivTicks(
   symbol: string,
@@ -135,54 +156,29 @@ export function subscribeDerivTicks(
 ): () => void {
   const dSym = toDerivSymbol(symbol);
   const granularity = intervalSec;
+  const token = resolveToken();
 
   let ws: WebSocket | null = null;
   let pingId: ReturnType<typeof setInterval> | null = null;
-  let pollId: ReturnType<typeof setInterval> | null = null;
   let attempt = 0;
   let stopped = false;
-  let subscribed = false;
+  let reconnecting = false;
 
-  function fetchLatestCandle() {
-    if (stopped) return;
-    const pollWs = new WebSocket(wsUrl());
-    pollWs.onopen = () => {
-      pollWs.send(JSON.stringify({
-        ticks_history: dSym,
-        style: 'candles',
-        granularity,
-        count: 1,
-        end: 'latest',
-      }));
-    };
-    pollWs.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data as string) as {
-          error?: { message: string };
-          msg_type?: string;
-          candles?: { epoch: number; open: string; high: string; low: string; close: string }[];
-        };
-        if (msg.msg_type === 'candles' && msg.candles && msg.candles.length > 0) {
-          const c = msg.candles[msg.candles.length - 1];
-          onTick({
-            time:   c.epoch,
-            open:   parseFloat(c.open),
-            high:   parseFloat(c.high),
-            low:    parseFloat(c.low),
-            close:  parseFloat(c.close),
-            volume: 0,
-          });
-        }
-      } catch { /* ignore */ }
-      pollWs.close();
-    };
-    pollWs.onerror = () => { try { pollWs.close(); } catch { /* ignore */ } };
-  }
-
-  function startPolling() {
-    if (pollId || stopped) return;
-    const pollInterval = Math.max(intervalSec * 1000, 5000);
-    pollId = setInterval(fetchLatestCandle, pollInterval);
+  function sendSubscription() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    // If a token is available, authorize first; subscription is sent independently after
+    if (token) {
+      ws.send(JSON.stringify({ authorize: token, req_id: nextReqId() }));
+    }
+    ws.send(JSON.stringify({
+      ticks_history: dSym,
+      style: 'candles',
+      granularity,
+      count: 1,
+      end: 'latest',
+      subscribe: 1,
+      req_id: nextReqId(),
+    }));
   }
 
   function connect() {
@@ -190,20 +186,14 @@ export function subscribeDerivTicks(
     try {
       ws = new WebSocket(wsUrl());
     } catch {
-      reconnect();
+      scheduleReconnect();
       return;
     }
 
     ws.onopen = () => {
       attempt = 0;
-      ws?.send(JSON.stringify({
-        ticks_history: dSym,
-        style: 'candles',
-        granularity,
-        count: 1,
-        end: 'latest',
-        subscribe: 1,
-      }));
+      reconnecting = false;
+      sendSubscription();
       pingId = setInterval(() => {
         if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }));
       }, pingIntervalMs);
@@ -214,65 +204,75 @@ export function subscribeDerivTicks(
         const msg = JSON.parse(ev.data as string) as {
           msg_type?: string;
           error?: { message: string };
-          ohlc?: { epoch: number; open_time: number; open: string; high: string; low: string; close: string };
+          ohlc?: {
+            open_time: number;
+            epoch: number;
+            open: string;
+            high: string;
+            low: string;
+            close: string;
+          };
         };
-        if (msg.error && !subscribed) {
-          // Subscribe failed (demo app_id limitation) — fall back to polling
-          if (pingId) { clearInterval(pingId); pingId = null; }
-          try { ws?.close(); } catch { /* ignore */ }
-          ws = null;
-          startPolling();
+        if (msg.error) {
+          console.warn('Deriv subscribe error:', msg.error.message);
           return;
         }
         if (msg.msg_type === 'ohlc' && msg.ohlc) {
-          subscribed = true;
           const c = msg.ohlc;
+          // CRITICAL: use open_time as the candle's time identity.
+          // The store's updateOrAppendCandle compares this with the last
+          // candle's time to decide merge vs. new-candle.
           onTick({
             time:   Number(c.open_time),
             open:   parseFloat(c.open),
             high:   parseFloat(c.high),
             low:    parseFloat(c.low),
             close:  parseFloat(c.close),
-            volume: 0,
+            volume: 0, // forex/metals volume is always 0
           });
         }
-      } catch { /* ignore */ }
+      } catch { /* ignore parse errors */ }
     };
 
     ws.onerror = () => {
-      if (!subscribed && !pollId) {
-        // Never successfully subscribed — start polling instead of reconnecting
-        if (pingId) { clearInterval(pingId); pingId = null; }
-        try { ws?.close(); } catch { /* ignore */ }
-        ws = null;
-        startPolling();
-      } else {
-        reconnect();
+      // Guard: only reconnect once per disconnect cycle
+      if (!reconnecting) {
+        reconnecting = true;
+        cleanupSocket();
+        scheduleReconnect();
       }
     };
 
     ws.onclose = () => {
-      if (pingId) { clearInterval(pingId); pingId = null; }
-      if (!subscribed && !pollId) {
-        startPolling();
-      } else if (subscribed) {
-        reconnect();
+      // Guard: onerror already triggered reconnect, don't duplicate
+      if (!reconnecting) {
+        reconnecting = true;
+        cleanupSocket();
+        scheduleReconnect();
       }
     };
   }
 
-  function reconnect() {
+  function cleanupSocket() {
+    if (pingId) { clearInterval(pingId); pingId = null; }
+    try { ws?.close(); } catch { /* ignore */ }
+    ws = null;
+  }
+
+  function scheduleReconnect() {
     if (stopped) return;
     const delay = BACKOFF[Math.min(attempt, BACKOFF.length - 1)];
     attempt++;
-    setTimeout(connect, delay);
+    setTimeout(() => {
+      reconnecting = false;
+      connect();
+    }, delay);
   }
 
   connect();
+
   return () => {
     stopped = true;
-    if (pingId) clearInterval(pingId);
-    if (pollId) clearInterval(pollId);
-    try { ws?.close(); } catch { /* ignore */ }
+    cleanupSocket();
   };
 }

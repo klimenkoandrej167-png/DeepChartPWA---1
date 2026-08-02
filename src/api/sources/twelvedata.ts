@@ -63,6 +63,7 @@ export function subscribeTwelvedataTicks(
   let ws: WebSocket | null = null;
   let attempt = 0;
   let stopped = false;
+  let reconnecting = false;
   const tdSym = toTwelvedataSymbol(symbol);
 
   function connect() {
@@ -71,6 +72,7 @@ export function subscribeTwelvedataTicks(
 
     ws.onopen = () => {
       attempt = 0;
+      reconnecting = false;
       ws?.send(JSON.stringify({ action: 'subscribe', params: { symbols: tdSym } }));
     };
 
@@ -88,15 +90,24 @@ export function subscribeTwelvedataTicks(
       } catch { /* ignore */ }
     };
 
-    ws.onerror = () => reconnect();
-    ws.onclose = () => reconnect();
+    ws.onerror = () => {
+      if (!reconnecting) { reconnecting = true; cleanup(); scheduleReconnect(); }
+    };
+    ws.onclose = () => {
+      if (!reconnecting) { reconnecting = true; cleanup(); scheduleReconnect(); }
+    };
   }
 
-  function reconnect() {
+  function cleanup() {
+    try { ws?.close(); } catch { /* ignore */ }
+    ws = null;
+  }
+
+  function scheduleReconnect() {
     if (stopped) return;
     const delay = BACKOFF[Math.min(attempt, BACKOFF.length - 1)];
     attempt++;
-    setTimeout(connect, delay);
+    setTimeout(() => { reconnecting = false; connect(); }, delay);
   }
 
   connect();

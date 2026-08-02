@@ -4,6 +4,7 @@ import { useKeysStore } from '../store/keysStore';
 import { selectDataSource } from '../api/dataRouter';
 import type { DataRouter } from '../api/dataRouter';
 import { compactGaps } from '../utils/compactTimeline';
+import { appendCachedCandle } from '../utils/historyCache';
 
 export function useDataSource() {
   const symbol        = useChartStore(s => s.symbol);
@@ -54,6 +55,8 @@ export function useDataSource() {
         const unsub = router.subscribeTicks((tick) => {
           if (cancelled) return;
           updateOrAppend(tick);
+          // Append new closed candles to IndexedDB cache
+          appendCachedCandle(symbol, interval, tick);
         });
         unsubRef.current = unsub;
 
