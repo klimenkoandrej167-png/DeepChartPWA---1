@@ -53,6 +53,7 @@ export function usePatternDetection() {
   const candlesRef       = useRef(candles);
   candlesRef.current     = candles;
   const levelSignalsThisCandleRef = useRef<PatternResult[]>([]);
+  const prevM5SweepsRef = useRef<PatternResult[]>([]);
   const chochTracker = useSweepChochTracker();
 
   useEffect(() => {
@@ -70,6 +71,16 @@ export function usePatternDetection() {
   analysisRef.current = (finalizedCandles: Candle[], isPreClose: boolean) => {
     const htfState = useHtfContextStore.getState();
 
+    // CHoCH tracker is stateful and depends on real-time m5 sweeps.
+    // Feed it the sweeps from the PREVIOUS analysis pass (stored in ref),
+    // so confirmed CHoCH signals are available to the engine for the
+    // direction score's liquidity component — matching original behavior.
+    const confirmedChoch = chochTracker.update(
+      htfState.m5.candles,
+      prevM5SweepsRef.current,
+      htfState.m5.swings,
+    );
+
     const result = runEngine({
       candles: finalizedCandles,
       symbol,
@@ -77,17 +88,12 @@ export function usePatternDetection() {
       predictionInputs,
       strategies,
       htf: { h1: htfState.h1, m15: htfState.m15, m5: htfState.m5 },
+      confirmedChoch,
       levelSignals: levelSignalsThisCandleRef.current,
     });
 
-    // CHoCH tracker is stateful and depends on real-time m5 sweeps.
-    // Feed it the m5 sweeps from the engine output, then pass confirmed
-    // CHoCH signals into the signal dispatch pipeline.
-    const confirmedChoch = chochTracker.update(
-      htfState.m5.candles,
-      result.m5Sweeps,
-      htfState.m5.swings,
-    );
+    // Store this pass's m5 sweeps for the next analysis cycle.
+    prevM5SweepsRef.current = result.m5Sweeps;
 
     setValues(result.indicators);
 

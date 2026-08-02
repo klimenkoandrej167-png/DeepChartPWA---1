@@ -35,6 +35,8 @@ export interface EngineInput {
   predictionInputs:  PredictionInputToggles;
   strategies:        StrategyToggles;
   htf:              { h1: HtfFrame; m15: HtfFrame; m5: HtfFrame };
+  /** Optional: CHoCH-confirmed signals from a stateful tracker (live hook only) */
+  confirmedChoch?:  PatternResult[];
   /** Optional: level-reaction signals accumulated since last candle close (live hook only) */
   levelSignals?:    PatternResult[];
 }
@@ -62,7 +64,7 @@ export interface EngineOutput {
  * The backtest engine calls this directly for each historical bar.
  */
 export function runEngine(input: EngineInput): EngineOutput {
-  const { candles, symbol, predictionInputs, strategies, htf, levelSignals } = input;
+  const { candles, symbol, predictionInputs, strategies, htf, confirmedChoch, levelSignals } = input;
 
   const closes = candles.map(c => c.close);
   const highs  = candles.map(c => c.high);
@@ -162,6 +164,7 @@ export function runEngine(input: EngineInput): EngineOutput {
     ...icbWithVolumeGate.slice(-2),
     ...m5Sweeps.slice(-3),
     ...obReactionSignals.slice(-2),
+    ...(confirmedChoch ?? []),
     ...(levelSignals ?? []).slice(-3),
   ];
 
