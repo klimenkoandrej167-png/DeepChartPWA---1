@@ -13,7 +13,7 @@ export interface Tick {
   time: number;
 }
 
-export type SourceStatus = 'connecting' | 'live' | 'error' | 'offline';
+export type SourceStatus = 'connecting' | 'live' | 'stale' | 'error' | 'offline';
 
 export type DataSourceName = 'binance' | 'deriv' | 'twelvedata' | 'finnhub' | 'yahoo' | 'proxy';
 

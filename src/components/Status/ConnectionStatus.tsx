@@ -5,6 +5,7 @@ import type { SourceStatus } from '../../types/candle';
 const STATUS_CONFIG: Record<SourceStatus, { label: string; dot: string; text: string }> = {
   live:       { label: 'LIVE',       dot: 'bg-green-400 animate-pulse', text: 'text-green-400' },
   connecting: { label: 'CONNECTING', dot: 'bg-yellow-400 animate-pulse', text: 'text-yellow-400' },
+  stale:      { label: 'STALE',       dot: 'bg-orange-400 animate-pulse', text: 'text-orange-400' },
   error:      { label: 'ERROR',      dot: 'bg-red-400',                  text: 'text-red-400' },
   offline:    { label: 'OFFLINE',    dot: 'bg-slate-500',                text: 'text-slate-500' },
 };
