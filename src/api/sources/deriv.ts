@@ -1,6 +1,7 @@
 import type { Candle, Interval } from '../../types/candle';
 import { DERIV_CONFIG } from '../providers.config';
 import { isCrypto } from '../../utils/symbolUtils';
+import { useKeysStore } from '../../store/keysStore';
 
 const {
   granularityMap: GRANULARITY_MAP,
@@ -10,29 +11,79 @@ const {
   wsUrl: WS_URL,
 } = DERIV_CONFIG;
 
+// ─── App ID / Token resolution ───────────────────────────────────────────────
+
 /**
- * Resolve the Deriv app_id from the environment.
+ * Session-scoped flag: once the server rejects the user's app_id as invalid,
+ * we fall back to the public demo ID (1089) for the rest of the page lifetime.
+ * This avoids repeated rejections on every reconnect attempt.
+ */
+let appIdRejected = false;
+
+/** Matches Deriv error messages like "InvalidAppID", "invalid app_id", etc. */
+const INVALID_APP_ID_RE = /invalid\s*app\s*_?id/i;
+
+/** Once per session: mark the user's app_id as rejected, fall back to demo. */
+function markAppIdRejected(source: string, errorDetail: string) {
+  if (appIdRejected) return;
+  appIdRejected = true;
+  console.warn(
+    `[Deriv] App ID rejected by server (${source}). ` +
+    `Falling back to demo app_id "${DERIV_CONFIG.defaultAppId}" for the rest of this session. ` +
+    `If you registered a new alphanumeric app_id at developers.deriv.com/dashboard, ` +
+    `it may be intended for the newer "Trading API v1" surface ` +
+    `(which uses an HTTP header and a different base URL) rather than the classic ` +
+    `wss://ws.derivws.com/websockets/v3?app_id= endpoint this app uses. ` +
+    `Contact Deriv support to confirm which API surface your app_id is valid for. ` +
+    `Server detail: ${errorDetail}`,
+  );
+}
+
+/**
+ * Resolve the Deriv app_id.
+ *
+ * Priority: keysStore (UI settings) → VITE_DERIV_APP_ID (env) → default 1089.
+ * If the ID was rejected by the server this session, always returns the demo
+ * fallback regardless of source.
  *
  * CRITICAL: Do NOT validate with a regex like /^\d+$/ — modern Deriv app_ids
- * can be alphanumeric. Pass VITE_DERIV_APP_ID through as-is. The only
- * fallback is when the variable is unset (undefined/empty): use 1089.
+ * can be alphanumeric. Pass the value through as-is. The only fallback is
+ * when the variable is unset (undefined/empty) or when the server explicitly
+ * rejected it (InvalidAppID).
  */
 function resolveAppId(): string {
-  const raw = import.meta.env.VITE_DERIV_APP_ID as string | undefined;
-  if (raw && raw.trim().length > 0) return raw.trim();
+  if (appIdRejected) return DERIV_CONFIG.defaultAppId;
+
+  const fromStore = useKeysStore.getState().derivAppId;
+  if (fromStore && fromStore.trim().length > 0) return fromStore.trim();
+
+  const fromEnv = import.meta.env.VITE_DERIV_APP_ID as string | undefined;
+  if (fromEnv && fromEnv.trim().length > 0) return fromEnv.trim();
+
   return DERIV_CONFIG.defaultAppId;
 }
 
 /** Optional Deriv token — only needed for account data, not for public candles */
 function resolveToken(): string | null {
-  const raw = import.meta.env.VITE_DERIV_TOKEN as string | undefined;
-  if (raw && raw.trim().length > 0) return raw.trim();
+  const fromStore = useKeysStore.getState().derivToken;
+  if (fromStore && fromStore.trim().length > 0) return fromStore.trim();
+
+  const fromEnv = import.meta.env.VITE_DERIV_TOKEN as string | undefined;
+  if (fromEnv && fromEnv.trim().length > 0) return fromEnv.trim();
+
   return null;
 }
 
 function wsUrl(): string {
   return `${WS_URL}?app_id=${resolveAppId()}`;
 }
+
+/** Reset session state — exposed for tests / future use. */
+export function _resetDerivSession() {
+  appIdRejected = false;
+}
+
+// ─── Symbol mapping ──────────────────────────────────────────────────────────
 
 /** Map a user-facing symbol to Deriv's internal symbol format */
 export function toDerivSymbol(symbol: string): string {
@@ -63,6 +114,8 @@ export function isDerivSupported(symbol: string): boolean {
 
 let reqIdCounter = 1;
 function nextReqId(): number { return reqIdCounter++; }
+
+// ─── History fetch ────────────────────────────────────────────────────────────
 
 export async function fetchDerivCandles(
   symbol: string,
@@ -102,12 +155,27 @@ export async function fetchDerivCandles(
       try {
         const msg = JSON.parse(ev.data as string) as {
           req_id?: number;
-          error?: { message: string };
+          error?: { code?: string; message: string };
           msg_type?: string;
           candles?: { epoch: number; open: string; high: string; low: string; close: string }[];
         };
         if (msg.error) {
           clearTimeout(timeout);
+
+          // Check for InvalidAppID — fall back to demo and retry once
+          if (INVALID_APP_ID_RE.test(msg.error.message) || msg.error.code === 'InvalidAppID') {
+            markAppIdRejected('fetchDerivCandles', JSON.stringify(msg.error));
+            ws.close();
+            // Retry with the demo app_id (resolveAppId now returns the fallback)
+            fetchDerivCandles(symbol, interval, count).then(resolve, reject);
+            return;
+          }
+
+          // DEV-only: log full error JSON for custom app_id diagnostics
+          if (import.meta.env.DEV) {
+            console.debug('[Deriv:fetch] Full error response:', JSON.stringify(msg, null, 2));
+          }
+
           ws.close();
           reject(new Error(`Deriv: ${msg.error.message}`));
           return;
@@ -139,13 +207,27 @@ export async function fetchDerivCandles(
   });
 }
 
+// ─── Live subscription ─────────────────────────────────────────────────────────
+
 type TickCallback = (c: Candle) => void;
+
+/**
+ * Watchdog: if no message (including errors) arrives within this window, the
+ * socket is considered a "zombie" — technically open but not delivering data.
+ * Clamped to [30s, 120s], scaled by 3× the candle interval.
+ */
+function watchdogIntervalMs(intervalSec: number): number {
+  return Math.min(Math.max(intervalSec * 1000 * 3, 30_000), 120_000);
+}
 
 /**
  * Subscribe to live OHLC updates from Deriv via a single WebSocket.
  *
- * Reconnect logic: onerror and onclose both fire on disconnect. A single
- * `reconnecting` flag ensures reconnect() runs exactly once per break.
+ * Reconnect logic:
+ *  - onerror / onclose → cleanup + scheduleReconnect (guarded by `reconnecting`)
+ *  - subscription error (msg.error) → cleanup + scheduleReconnect (was: log only)
+ *  - watchdog (no message for N ms) → cleanup + scheduleReconnect
+ *
  * After reconnect, the subscription is re-sent (Deriv forgets subscriptions
  * on socket disconnect).
  */
@@ -160,9 +242,13 @@ export function subscribeDerivTicks(
 
   let ws: WebSocket | null = null;
   let pingId: ReturnType<typeof setInterval> | null = null;
+  let watchdogId: ReturnType<typeof setInterval> | null = null;
+  let lastMessageAt = 0;
   let attempt = 0;
   let stopped = false;
   let reconnecting = false;
+
+  const watchdogMs = watchdogIntervalMs(intervalSec);
 
   function sendSubscription() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -193,17 +279,35 @@ export function subscribeDerivTicks(
     ws.onopen = () => {
       attempt = 0;
       reconnecting = false;
+      lastMessageAt = Date.now();
       sendSubscription();
       pingId = setInterval(() => {
         if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: 1 }));
       }, pingIntervalMs);
+
+      // Watchdog: check periodically if the socket has gone silent.
+      // Check every watchdogMs / 2 so we detect zombie state within ~1.5× the window.
+      watchdogId = setInterval(() => {
+        if (stopped || !ws) return;
+        const elapsed = Date.now() - lastMessageAt;
+        if (elapsed > watchdogMs) {
+          // Socket is open but silent — treat as zombie, force reconnect
+          if (!reconnecting) {
+            reconnecting = true;
+            console.warn(`Deriv: no message for ${elapsed}ms, treating as zombie and reconnecting`);
+            cleanupSocket();
+            scheduleReconnect();
+          }
+        }
+      }, Math.max(watchdogMs / 2, 15_000));
     };
 
     ws.onmessage = (ev) => {
+      lastMessageAt = Date.now();
       try {
         const msg = JSON.parse(ev.data as string) as {
           msg_type?: string;
-          error?: { message: string };
+          error?: { code?: string; message: string };
           ohlc?: {
             open_time: number;
             epoch: number;
@@ -214,7 +318,30 @@ export function subscribeDerivTicks(
           };
         };
         if (msg.error) {
-          console.warn('Deriv subscribe error:', msg.error.message);
+          // InvalidAppID: fall back to demo, then reconnect with the new ID
+          if (INVALID_APP_ID_RE.test(msg.error.message) || msg.error.code === 'InvalidAppID') {
+            markAppIdRejected('subscribeDerivTicks', JSON.stringify(msg.error));
+            if (!reconnecting) {
+              reconnecting = true;
+              cleanupSocket();
+              scheduleReconnect();
+            }
+            return;
+          }
+
+          // DEV-only: log full error JSON for custom app_id diagnostics
+          if (import.meta.env.DEV) {
+            console.debug('[Deriv:subscribe] Full error response:', JSON.stringify(msg, null, 2));
+          }
+
+          // Any other subscription error must trigger a full reconnect cycle,
+          // not just a console.warn — otherwise the chart silently freezes.
+          if (!reconnecting) {
+            reconnecting = true;
+            console.warn('Deriv subscribe error (reconnecting):', msg.error.message);
+            cleanupSocket();
+            scheduleReconnect();
+          }
           return;
         }
         if (msg.msg_type === 'ohlc' && msg.ohlc) {
@@ -255,6 +382,7 @@ export function subscribeDerivTicks(
 
   function cleanupSocket() {
     if (pingId) { clearInterval(pingId); pingId = null; }
+    if (watchdogId) { clearInterval(watchdogId); watchdogId = null; }
     try { ws?.close(); } catch { /* ignore */ }
     ws = null;
   }

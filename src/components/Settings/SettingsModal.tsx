@@ -76,7 +76,7 @@ const PREDICTION_LABELS: Record<keyof PredictionInputToggles, string> = {
 };
 
 export default function SettingsModal({ onClose }: Props) {
-  const { geminiKey, twelvedataKey, finnhubKey, setGeminiKey, setTwelvedataKey, setFinnhubKey } = useKeysStore();
+  const { geminiKey, twelvedataKey, finnhubKey, derivAppId, derivToken, setGeminiKey, setTwelvedataKey, setFinnhubKey, setDerivAppId, setDerivToken } = useKeysStore();
   const { soundEnabled, indicators, setSoundEnabled, toggleIndicator, predictionInputs, togglePredictionInput, customSpreadOverrides, setCustomSpread, strictAsianSession, setStrictAsianSession } = useSettingsStore();
   const { activeSources } = useChartStore();
   const chartSymbol = useChartStore(s => s.symbol);
@@ -100,6 +100,11 @@ export default function SettingsModal({ onClose }: Props) {
               <KeyField label="Gemini AI" value={geminiKey} onChange={setGeminiKey} placeholder="AIzaSy..." />
               <KeyField label="TwelveData" value={twelvedataKey} onChange={setTwelvedataKey} placeholder="your_key_here" />
               <KeyField label="Finnhub" value={finnhubKey} onChange={setFinnhubKey} placeholder="your_key_here" />
+              <KeyField label="Deriv App ID" value={derivAppId} onChange={setDerivAppId} placeholder="1089 или ваш ID с developers.deriv.com" />
+              <KeyField label="Deriv API Token (опционально)" value={derivToken} onChange={setDerivToken} placeholder="ваш токен Deriv" />
+              <p className="text-slate-500 text-[10px] leading-relaxed">
+                Deriv App ID используется для wss://ws.derivws.com/websockets/v3. Если ID выдан для нового Trading API v1 (буквенно-числового формата), он может не подойти — уточните у поддержки Deriv, для какого API он предназначен.
+              </p>
             </div>
             <p className="text-slate-600 text-xs mt-2">Keys are stored only for this browser tab session (sessionStorage) — they are cleared when you close the tab.</p>
           </section>

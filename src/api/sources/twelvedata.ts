@@ -54,6 +54,14 @@ export async function fetchTwelvedataCandles(
 type TickCallback = (c: Candle) => void;
 const BACKOFF = [3000, 6000, 12000, 30000, 60000];
 
+/**
+ * Watchdog: if no message arrives within this window, the socket is considered
+ * a "zombie" — open but not delivering data. Clamped to [30s, 120s], 3× interval.
+ */
+function watchdogIntervalMs(intervalSec: number): number {
+  return Math.min(Math.max(intervalSec * 1000 * 3, 30_000), 120_000);
+}
+
 export function subscribeTwelvedataTicks(
   symbol: string,
   apiKey: string,
@@ -64,7 +72,10 @@ export function subscribeTwelvedataTicks(
   let attempt = 0;
   let stopped = false;
   let reconnecting = false;
+  let lastMessageAt = 0;
+  let watchdogId: ReturnType<typeof setInterval> | null = null;
   const tdSym = toTwelvedataSymbol(symbol);
+  const watchdogMs = watchdogIntervalMs(intervalSec);
 
   function connect() {
     if (stopped) return;
@@ -73,14 +84,38 @@ export function subscribeTwelvedataTicks(
     ws.onopen = () => {
       attempt = 0;
       reconnecting = false;
+      lastMessageAt = Date.now();
       ws?.send(JSON.stringify({ action: 'subscribe', params: { symbols: tdSym } }));
+
+      watchdogId = setInterval(() => {
+        if (stopped || !ws) return;
+        const elapsed = Date.now() - lastMessageAt;
+        if (elapsed > watchdogMs && !reconnecting) {
+          reconnecting = true;
+          console.warn(`TwelveData: no message for ${elapsed}ms, treating as zombie and reconnecting`);
+          cleanup();
+          scheduleReconnect();
+        }
+      }, Math.max(watchdogMs / 2, 15_000));
     };
 
     ws.onmessage = (ev) => {
+      lastMessageAt = Date.now();
       try {
         const msg = JSON.parse(ev.data as string) as {
           event?: string; price?: string; timestamp?: number;
+          status?: string; message?: string;
         };
+        // TwelveData sends subscription errors as { status: 'error', message: '...' }
+        if (msg.status === 'error' && msg.message) {
+          if (!reconnecting) {
+            reconnecting = true;
+            console.warn('TwelveData subscribe error (reconnecting):', msg.message);
+            cleanup();
+            scheduleReconnect();
+          }
+          return;
+        }
         if (msg.event === 'price' && msg.price) {
           const price    = parseFloat(msg.price);
           const rawTime  = msg.timestamp ?? Math.floor(Date.now() / 1000);
@@ -99,6 +134,7 @@ export function subscribeTwelvedataTicks(
   }
 
   function cleanup() {
+    if (watchdogId) { clearInterval(watchdogId); watchdogId = null; }
     try { ws?.close(); } catch { /* ignore */ }
     ws = null;
   }
@@ -111,5 +147,5 @@ export function subscribeTwelvedataTicks(
   }
 
   connect();
-  return () => { stopped = true; ws?.close(); };
+  return () => { stopped = true; cleanup(); };
 }

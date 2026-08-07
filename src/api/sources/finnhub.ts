@@ -61,6 +61,14 @@ export async function fetchFinnhubCandles(
 type TickCallback = (c: Candle) => void;
 const BACKOFF = [3000, 6000, 12000, 30000, 60000];
 
+/**
+ * Watchdog: if no message arrives within this window, the socket is considered
+ * a "zombie" — open but not delivering data. Clamped to [30s, 120s], 3× interval.
+ */
+function watchdogIntervalMs(intervalSec: number): number {
+  return Math.min(Math.max(intervalSec * 1000 * 3, 30_000), 120_000);
+}
+
 export function subscribeFinnhubTicks(
   symbol: string,
   apiKey: string,
@@ -71,7 +79,10 @@ export function subscribeFinnhubTicks(
   let attempt = 0;
   let stopped = false;
   let reconnecting = false;
+  let lastMessageAt = 0;
+  let watchdogId: ReturnType<typeof setInterval> | null = null;
   const fhSym = toFinnhubForexSymbol(symbol);
+  const watchdogMs = watchdogIntervalMs(intervalSec);
 
   function connect() {
     if (stopped) return;
@@ -80,15 +91,39 @@ export function subscribeFinnhubTicks(
     ws.onopen = () => {
       attempt = 0;
       reconnecting = false;
+      lastMessageAt = Date.now();
       ws?.send(JSON.stringify({ type: 'subscribe', symbol: fhSym }));
+
+      watchdogId = setInterval(() => {
+        if (stopped || !ws) return;
+        const elapsed = Date.now() - lastMessageAt;
+        if (elapsed > watchdogMs && !reconnecting) {
+          reconnecting = true;
+          console.warn(`Finnhub: no message for ${elapsed}ms, treating as zombie and reconnecting`);
+          cleanup();
+          scheduleReconnect();
+        }
+      }, Math.max(watchdogMs / 2, 15_000));
     };
 
     ws.onmessage = (ev) => {
+      lastMessageAt = Date.now();
       try {
         const msg = JSON.parse(ev.data as string) as {
           type?: string;
+          msg?: string;
           data?: { s: string; p: number; t: number }[];
         };
+        // Finnhub sends errors as { type: 'error', msg: '...' }
+        if (msg.type === 'error' && msg.msg) {
+          if (!reconnecting) {
+            reconnecting = true;
+            console.warn('Finnhub subscribe error (reconnecting):', msg.msg);
+            cleanup();
+            scheduleReconnect();
+          }
+          return;
+        }
         if (msg.type === 'trade' && msg.data?.length) {
           for (const d of msg.data) {
             const rawTime  = Math.floor(d.t / 1000);
@@ -108,6 +143,7 @@ export function subscribeFinnhubTicks(
   }
 
   function cleanup() {
+    if (watchdogId) { clearInterval(watchdogId); watchdogId = null; }
     try { ws?.close(); } catch { /* ignore */ }
     ws = null;
   }
@@ -120,5 +156,5 @@ export function subscribeFinnhubTicks(
   }
 
   connect();
-  return () => { stopped = true; ws?.close(); };
+  return () => { stopped = true; cleanup(); };
 }

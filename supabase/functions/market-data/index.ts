@@ -75,12 +75,31 @@ async function fetchBinanceCandles(symbol: string, interval: string, limit: numb
   throw new Error("Binance: no data from any host");
 }
 
+// Session-scoped flag: once the server rejects the configured app_id, we fall
+// back to the demo 1089 for the remainder of the Edge Function's lifetime.
+let serverAppIdRejected = false;
+const INVALID_APP_ID_RE = /invalid\s*app\s*_?id/i;
+
 function derivWsUrl(): string {
   // Read app_id from edge function environment variable (configured in Supabase
   // dashboard under Edge Function secrets as DERIV_APP_ID). Falls back to the
-  // public demo 1089 only if the secret is not set.
+  // public demo 1089 if the secret is not set OR if it was rejected by the server.
+  if (serverAppIdRejected) return `wss://ws.derivws.com/websockets/v3?app_id=1089`;
   const appId = Deno.env.get("DERIV_APP_ID") ?? "1089";
   return `wss://ws.derivws.com/websockets/v3?app_id=${appId}`;
+}
+
+/** Mark the configured app_id as rejected; fall back to demo 1089. */
+function markServerAppIdRejected(source: string, errorDetail: string) {
+  if (serverAppIdRejected) return;
+  serverAppIdRejected = true;
+  console.warn(
+    `[market-data] Deriv App ID rejected (${source}). ` +
+    `Falling back to demo app_id "1089". ` +
+    `If DERIV_APP_ID was set to a new alphanumeric ID from developers.deriv.com/dashboard, ` +
+    `it may be intended for the newer Trading API v1 surface, not the classic WebSocket endpoint. ` +
+    `Server detail: ${errorDetail}`,
+  );
 }
 
 async function fetchDerivCandles(symbol: string, interval: string, count: number): Promise<Candle[]> {
@@ -121,6 +140,14 @@ async function fetchDerivCandles(symbol: string, interval: string, count: number
         if (msg.error) {
           clearTimeout(timeout);
           ws.close();
+
+          // InvalidAppID: fall back to demo 1089 and retry once
+          if (INVALID_APP_ID_RE.test(msg.error.message) || (msg.error as { code?: string }).code === "InvalidAppID") {
+            markServerAppIdRejected("fetchDerivCandles", JSON.stringify(msg.error));
+            fetchDerivCandles(symbol, interval, Math.min(limit, 1000)).then(resolve, reject);
+            return;
+          }
+
           reject(new Error(`Deriv: ${msg.error.message}`));
           return;
         }
