@@ -75,7 +75,7 @@ function resolveToken(): string | null {
 }
 
 function wsUrl(): string {
-  return `${WS_URL}?app_id=${resolveAppId()}`;
+  return `${WS_URL}?app_id=${encodeURIComponent(resolveAppId())}`;
 }
 
 /** Reset session state — exposed for tests / future use. */

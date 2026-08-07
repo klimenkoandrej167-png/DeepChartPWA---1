@@ -26,6 +26,12 @@ const PRE_CLOSE_TRIGGER_SECONDS = 5;
 const LIGHT_ANALYSIS_INTERVAL_MS = 2000;
 const CLOSE_WINDOW_MIN_CONFIDENCE = 75;
 
+function isFeedStale(lastTickAt: number, intervalMs: number): boolean {
+  if (lastTickAt === 0) return false;
+  const staleThresholdMs = Math.max(15_000, intervalMs * 2);
+  return Date.now() - lastTickAt > staleThresholdMs;
+}
+
 export function usePatternDetection() {
   const candles  = useChartStore(s => s.candles);
   const symbol   = useChartStore(s => s.symbol);
@@ -161,7 +167,10 @@ export function usePatternDetection() {
       const last = cs[cs.length - 1];
       if (!last) return;
 
-      const ivlSec     = intervalToMs(interval) / 1000;
+      const ivlMsForStale = intervalToMs(interval);
+      if (isFeedStale(useChartStore.getState().lastTickAt, ivlMsForStale)) return;
+
+      const ivlSec     = ivlMsForStale / 1000;
       const candleEnd  = (last.time + ivlSec) * 1000;
       const secondsLeft = Math.max(0, Math.floor((candleEnd - Date.now()) / 1000));
 
@@ -187,7 +196,10 @@ export function usePatternDetection() {
       const last = cs[cs.length - 1];
       if (!last) return;
 
-      const ivlSec = intervalToMs(interval) / 1000;
+      const ivlMsForStale = intervalToMs(interval);
+      if (isFeedStale(useChartStore.getState().lastTickAt, ivlMsForStale)) return;
+
+      const ivlSec = ivlMsForStale / 1000;
       const candleEnd = (last.time + ivlSec) * 1000;
       const secondsLeft = Math.max(0, Math.floor((candleEnd - Date.now()) / 1000));
 

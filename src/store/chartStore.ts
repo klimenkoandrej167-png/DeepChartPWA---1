@@ -9,6 +9,7 @@ interface ChartState {
   candles: Candle[];
   sourceStatus: SourceStatus;
   activeSources: DataSourceName[];
+  lastTickAt: number;
 
   setSymbol: (s: string) => void;
   setInterval: (i: Interval) => void;
@@ -24,17 +25,18 @@ export const useChartStore = create<ChartState>()((set) => ({
   candles:      [],
   sourceStatus: 'connecting',
   activeSources: [],
+  lastTickAt:   0,
 
   setSymbol:        (symbol) => set({ symbol }),
   setInterval:      (interval) => set({ interval }),
-  setCandles:       (candles) => set({ candles: candles.slice(-MAX_CANDLES) }),
+  setCandles:       (candles) => set({ candles: candles.slice(-MAX_CANDLES), lastTickAt: candles.length > 0 ? Date.now() : 0 }),
   setSourceStatus:  (sourceStatus) => set({ sourceStatus }),
   setActiveSources: (activeSources) => set({ activeSources }),
 
   updateOrAppendCandle(c) {
     set((s) => {
       const arr = s.candles;
-      if (arr.length === 0) return { candles: [c] };
+      if (arr.length === 0) return { candles: [c], lastTickAt: Date.now() };
 
       const last = arr[arr.length - 1];
 
@@ -52,14 +54,14 @@ export const useChartStore = create<ChartState>()((set) => ({
         };
         const next = [...arr];
         next[next.length - 1] = merged;
-        return { candles: next };
+        return { candles: next, lastTickAt: Date.now() };
       }
 
       // New candle — only append if it's actually newer
       if (c.time > last.time) {
         const next = [...arr, c];
         if (next.length > MAX_CANDLES) next.splice(0, next.length - MAX_CANDLES);
-        return { candles: next };
+        return { candles: next, lastTickAt: Date.now() };
       }
 
       // Stale tick (time < last) — ignore, don't create duplicates
