@@ -4,11 +4,16 @@ import { intervalToMs } from '../utils/timeframeUtils';
 import { isCrypto } from '../utils/symbolUtils';
 import { isForexMarketOpen } from '../utils/marketHours';
 
-export function useCandleTimer(): number {
+export interface CandleTimerState {
+  seconds: number;
+  waiting: boolean;
+}
+
+export function useCandleTimer(): CandleTimerState {
   const candles  = useChartStore(s => s.candles);
   const interval = useChartStore(s => s.interval);
-  const symbol    = useChartStore(s => s.symbol);
-  const [secondsLeft, setSecondsLeft] = useState(0);
+  const symbol   = useChartStore(s => s.symbol);
+  const [state, setState] = useState<CandleTimerState>({ seconds: 0, waiting: false });
 
   const candlesRef = useRef(candles);
   candlesRef.current = candles;
@@ -17,21 +22,26 @@ export function useCandleTimer(): number {
     function update() {
       const cs = candlesRef.current;
       if (cs.length === 0) {
-        setSecondsLeft(0);
+        setState({ seconds: 0, waiting: false });
         return;
       }
 
-      // When the forex market is closed, don't count down — show 0.
       if (!isCrypto(symbol) && !isForexMarketOpen()) {
-        setSecondsLeft(0);
+        setState({ seconds: 0, waiting: false });
         return;
       }
 
       const last      = cs[cs.length - 1];
       const ivlMs     = intervalToMs(interval);
-      const candleEnd = (last.time + Math.floor(ivlMs / 1000)) * 1000;
+      const ivlSec    = Math.floor(ivlMs / 1000);
+      const candleEnd = (last.time + ivlSec) * 1000;
       const diff      = candleEnd - Date.now();
-      setSecondsLeft(Math.max(0, Math.floor(diff / 1000)));
+
+      if (diff > 0) {
+        setState({ seconds: Math.floor(diff / 1000), waiting: false });
+      } else {
+        setState({ seconds: 0, waiting: true });
+      }
     }
 
     update();
@@ -39,5 +49,5 @@ export function useCandleTimer(): number {
     return () => clearInterval(id);
   }, [interval, symbol]);
 
-  return secondsLeft;
+  return state;
 }
