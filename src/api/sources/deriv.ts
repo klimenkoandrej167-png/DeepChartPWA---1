@@ -308,6 +308,7 @@ export function subscribeDerivTicks(
         const msg = JSON.parse(ev.data as string) as {
           msg_type?: string;
           error?: { code?: string; message: string };
+          candles?: { epoch: number; open: string; high: string; low: string; close: string }[];
           ohlc?: {
             open_time: number;
             epoch: number;
@@ -344,18 +345,27 @@ export function subscribeDerivTicks(
           }
           return;
         }
-        if (msg.msg_type === 'ohlc' && msg.ohlc) {
+        // ticks_history with style:'candles' + subscribe:1 delivers
+        // msg_type:'candles' (array), NOT 'ohlc'. Support both formats.
+        if (msg.msg_type === 'candles' && msg.candles && msg.candles.length > 0) {
+          const c = msg.candles[0];
+          onTick({
+            time:   c.epoch,
+            open:   parseFloat(c.open),
+            high:   parseFloat(c.high),
+            low:    parseFloat(c.low),
+            close:  parseFloat(c.close),
+            volume: 0,
+          });
+        } else if (msg.msg_type === 'ohlc' && msg.ohlc) {
           const c = msg.ohlc;
-          // CRITICAL: use open_time as the candle's time identity.
-          // The store's updateOrAppendCandle compares this with the last
-          // candle's time to decide merge vs. new-candle.
           onTick({
             time:   Number(c.open_time),
             open:   parseFloat(c.open),
             high:   parseFloat(c.high),
             low:    parseFloat(c.low),
             close:  parseFloat(c.close),
-            volume: 0, // forex/metals volume is always 0
+            volume: 0,
           });
         }
       } catch { /* ignore parse errors */ }

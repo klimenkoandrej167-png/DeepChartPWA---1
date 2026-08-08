@@ -53,7 +53,8 @@ export function usePatternDetection() {
   const resolvePrediction = usePredictionStore(s => s.resolveForCandle);
 
   const lastPatternsRef  = useRef<Set<string>>(new Set());
-  const firedCandleRef   = useRef<number>(-1);
+  const preCloseFiredRef  = useRef<number>(-1);
+  const postCloseFiredRef = useRef<number>(-1);
   const prevSymbolRef    = useRef(symbol);
   const prevIntervalRef  = useRef(interval);
   const candlesRef       = useRef(candles);
@@ -66,7 +67,8 @@ export function usePatternDetection() {
     if (prevSymbolRef.current !== symbol || prevIntervalRef.current !== interval) {
       prevSymbolRef.current   = symbol;
       prevIntervalRef.current = interval;
-      firedCandleRef.current  = -1;
+      preCloseFiredRef.current  = -1;
+      postCloseFiredRef.current = -1;
       lastPatternsRef.current = new Set();
       reset();
     }
@@ -174,8 +176,10 @@ export function usePatternDetection() {
       const candleEnd  = (last.time + ivlSec) * 1000;
       const secondsLeft = Math.max(0, Math.floor((candleEnd - Date.now()) / 1000));
 
-      if (secondsLeft <= PRE_CLOSE_TRIGGER_SECONDS && firedCandleRef.current !== last.time) {
-        firedCandleRef.current = last.time;
+      // Pre-close: fire lightweight analysis 5s before candle close
+      if (secondsLeft <= PRE_CLOSE_TRIGGER_SECONDS && secondsLeft > 0
+          && preCloseFiredRef.current !== last.time) {
+        preCloseFiredRef.current = last.time;
 
         const prev = cs[cs.length - 2];
         if (prev) {
@@ -183,6 +187,22 @@ export function usePatternDetection() {
         }
 
         analysisRef.current(cs, true);
+      }
+
+      // Post-close: fire final analysis after the candle has closed.
+      // This runs when secondsLeft hits 0 — the candle is finalized.
+      if (secondsLeft <= 0 && postCloseFiredRef.current !== last.time) {
+        postCloseFiredRef.current = last.time;
+
+        const prev = cs[cs.length - 2];
+        if (prev) {
+          resolvePrediction({ symbol, interval, candleTime: prev.time, actualClose: prev.close });
+        }
+
+        analysisRef.current(cs, false);
+
+        // Clear level signals from the now-closed candle for the next cycle
+        levelSignalsThisCandleRef.current = [];
       }
     }, 1000);
 
