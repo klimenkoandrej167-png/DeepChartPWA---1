@@ -243,12 +243,37 @@ export function subscribeDerivTicks(
   let ws: WebSocket | null = null;
   let pingId: ReturnType<typeof setInterval> | null = null;
   let watchdogId: ReturnType<typeof setInterval> | null = null;
+  let candleCloseCheckId: ReturnType<typeof setInterval> | null = null;
+  let lastCandleTime = 0;
   let lastMessageAt = 0;
   let attempt = 0;
   let stopped = false;
   let reconnecting = false;
 
   const watchdogMs = watchdogIntervalMs(intervalSec);
+
+  // Synthetic candle-close detection: Deriv's subscription delivers updates
+  // for the current candle but may not promptly signal that the candle has
+  // closed and a new one opened. This timer checks whether the current candle
+  // should have closed (open_time + granularity + 2s buffer) and, if so,
+  // sends a one-shot history request to fetch the finalized candle. The
+  // response triggers onTick with the new candle, which updateOrAppendCandle
+  // appends to the array — unblocking post-close analysis.
+  function checkCandleClose() {
+    if (stopped || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (lastCandleTime === 0) return;
+    const expectedCloseMs = (lastCandleTime + intervalSec) * 1000;
+    if (Date.now() < expectedCloseMs + 2000) return;
+    // Candle should have closed — fetch the latest candle(s) to bridge the gap
+    ws.send(JSON.stringify({
+      ticks_history: dSym,
+      style: 'candles',
+      granularity,
+      count: 2,
+      end: 'latest',
+      req_id: nextReqId(),
+    }));
+  }
 
   function sendSubscription() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -348,19 +373,24 @@ export function subscribeDerivTicks(
         // ticks_history with style:'candles' + subscribe:1 delivers
         // msg_type:'candles' (array), NOT 'ohlc'. Support both formats.
         if (msg.msg_type === 'candles' && msg.candles && msg.candles.length > 0) {
-          const c = msg.candles[0];
-          onTick({
-            time:   c.epoch,
-            open:   parseFloat(c.open),
-            high:   parseFloat(c.high),
-            low:    parseFloat(c.low),
-            close:  parseFloat(c.close),
-            volume: 0,
-          });
+          for (const c of msg.candles) {
+            const ct = c.epoch;
+            if (ct > lastCandleTime) lastCandleTime = ct;
+            onTick({
+              time:   ct,
+              open:   parseFloat(c.open),
+              high:   parseFloat(c.high),
+              low:    parseFloat(c.low),
+              close:  parseFloat(c.close),
+              volume: 0,
+            });
+          }
         } else if (msg.msg_type === 'ohlc' && msg.ohlc) {
           const c = msg.ohlc;
+          const ct = Number(c.open_time);
+          if (ct > lastCandleTime) lastCandleTime = ct;
           onTick({
-            time:   Number(c.open_time),
+            time:   ct,
             open:   parseFloat(c.open),
             high:   parseFloat(c.high),
             low:    parseFloat(c.low),
@@ -393,6 +423,7 @@ export function subscribeDerivTicks(
   function cleanupSocket() {
     if (pingId) { clearInterval(pingId); pingId = null; }
     if (watchdogId) { clearInterval(watchdogId); watchdogId = null; }
+    if (candleCloseCheckId) { clearInterval(candleCloseCheckId); candleCloseCheckId = null; }
     try { ws?.close(); } catch { /* ignore */ }
     ws = null;
   }
@@ -408,6 +439,7 @@ export function subscribeDerivTicks(
   }
 
   connect();
+  candleCloseCheckId = setInterval(checkCandleClose, 2000);
 
   return () => {
     stopped = true;
