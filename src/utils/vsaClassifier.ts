@@ -18,12 +18,23 @@ export function classifyVsaBar(
   candle: Candle,
   avgVolume: number,
   avgRange: number,
+  impulseVelocity?: number,
 ): VsaSignal {
-  if (avgVolume <= 0 || avgRange <= 0) return 'neutral';
+  if (avgRange <= 0) return 'neutral';
 
   const range = candle.high - candle.low;
   const isBull = candle.close > candle.open;
   const isBear = candle.close < candle.open;
+
+  // Volume unavailable (forex via Deriv where volume is always 0) —
+  // use impulse velocity as a body-size proxy to detect weak moves
+  if (avgVolume <= 0) {
+    if (impulseVelocity !== undefined && impulseVelocity < 0.7 && range < avgRange * NARROW_RANGE_MULT) {
+      if (isBull) return 'no_demand';
+      if (isBear) return 'no_supply';
+    }
+    return 'neutral';
+  }
 
   // Effort vs Result: high volume, narrow range = absorption by a larger player
   if (candle.volume > avgVolume * HIGH_VOL_MULT && range < avgRange * NARROW_RANGE_MULT) {

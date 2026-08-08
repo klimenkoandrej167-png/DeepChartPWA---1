@@ -23,7 +23,6 @@ import type { Candle } from '../types/candle';
 import type { PatternResult } from '../types/pattern';
 
 const PRE_CLOSE_TRIGGER_SECONDS = 5;
-const LIGHT_ANALYSIS_INTERVAL_MS = 2000;
 const CLOSE_WINDOW_MIN_CONFIDENCE = 75;
 
 function isFeedStale(lastTickAt: number, intervalMs: number): boolean {
@@ -199,69 +198,42 @@ export function usePatternDetection() {
           resolvePrediction({ symbol, interval, candleTime: prev.time, actualClose: prev.close });
         }
 
+        // Detect level reactions only on the closed candle — not every 2s on the forming candle
+        const indState = useIndicatorStore.getState().values;
+        const htfState = useHtfContextStore.getState();
+        const levelSignals = detectLevelReactions({
+          candles: cs,
+          vwap: indState.vwap ?? [],
+          srLevels: indState.srLevels,
+          liquidityPools: htfState.m5.liquidityPools ?? [],
+          atr: indState.atr,
+        });
+        levelSignalsThisCandleRef.current = levelSignals;
+
         analysisRef.current(cs, false);
 
-        // Clear level signals from the now-closed candle for the next cycle
+        for (const p of levelSignals) {
+          const k = `${p.type}_${p.index}`;
+          if (lastPatternsRef.current.has(k)) continue;
+          lastPatternsRef.current.add(k);
+          if (p.confidence < CLOSE_WINDOW_MIN_CONFIDENCE) continue;
+          addSignal({
+            id: `${p.type}_${p.index}_${Date.now()}`,
+            pattern: p,
+            symbol,
+            interval,
+            candleTime: cs[p.index]?.time ?? last.time,
+            createdAt: Date.now(),
+            preClose: false,
+          });
+        }
+
         levelSignalsThisCandleRef.current = [];
       }
     }, 1000);
 
     return () => clearInterval(id);
-  }, [interval, symbol, resolvePrediction]);
-
-  useEffect(() => {
-    const id = setInterval(() => {
-      const cs = candlesRef.current;
-      if (cs.length < 10) return;
-      const last = cs[cs.length - 1];
-      if (!last) return;
-
-      const ivlMsForStale = intervalToMs(interval);
-      if (isFeedStale(useChartStore.getState().lastTickAt, ivlMsForStale)) return;
-
-      const ivlSec = ivlMsForStale / 1000;
-      const candleEnd = (last.time + ivlSec) * 1000;
-      const secondsLeft = Math.max(0, Math.floor((candleEnd - Date.now()) / 1000));
-
-      const indState = useIndicatorStore.getState().values;
-      const htfState = useHtfContextStore.getState();
-
-      const levelSignals = detectLevelReactions({
-        candles: cs,
-        vwap: indState.vwap ?? [],
-        srLevels: indState.srLevels,
-        liquidityPools: htfState.m5.liquidityPools ?? [],
-        atr: indState.atr,
-      });
-
-      const inCloseWindow = secondsLeft <= PRE_CLOSE_TRIGGER_SECONDS;
-
-      for (const p of levelSignals) {
-        const k = `${p.type}_${p.index}`;
-        if (lastPatternsRef.current.has(k)) continue;
-        lastPatternsRef.current.add(k);
-
-        levelSignalsThisCandleRef.current.push(p);
-        if (levelSignalsThisCandleRef.current.length > 20) levelSignalsThisCandleRef.current.shift();
-
-        if (inCloseWindow && p.confidence < CLOSE_WINDOW_MIN_CONFIDENCE) continue;
-
-        const id2 = `${p.type}_${p.index}_${Date.now()}`;
-        const signal = {
-          id: id2,
-          pattern: p,
-          symbol,
-          interval,
-          candleTime: cs[p.index]?.time ?? last.time,
-          createdAt: Date.now(),
-          preClose: inCloseWindow,
-        };
-        addSignal(signal);
-      }
-    }, LIGHT_ANALYSIS_INTERVAL_MS);
-
-    return () => clearInterval(id);
-  }, [interval, symbol, addSignal]);
+  }, [interval, symbol, resolvePrediction, addSignal]);
 }
 
 const PRIORITY_ALERT_THRESHOLD = 75;

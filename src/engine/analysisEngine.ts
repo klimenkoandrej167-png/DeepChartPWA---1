@@ -153,7 +153,7 @@ export function runEngine(input: EngineInput): EngineOutput {
   const recentForVsa = candles.slice(-21, -1);
   const avgVolumeForVsa = recentForVsa.reduce((s, c) => s + c.volume, 0) / (recentForVsa.length || 1);
   const avgRangeForVsa = recentForVsa.reduce((s, c) => s + (c.high - c.low), 0) / (recentForVsa.length || 1);
-  const vsaSignal = volumeAvailable ? classifyVsaBar(last, avgVolumeForVsa, avgRangeForVsa) : undefined;
+  const vsaSignal = classifyVsaBar(last, avgVolumeForVsa, avgRangeForVsa, impulseVel);
 
   const activityWindow = isCrypto(symbol) ? undefined : getActivityWindow();
 
