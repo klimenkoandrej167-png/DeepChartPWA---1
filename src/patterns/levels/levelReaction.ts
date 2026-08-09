@@ -37,10 +37,10 @@ export function detectLevelReactions(params: {
 
   for (const sr of srLevels) {
     if (Math.abs(last.low - sr.price) < tolerance && bullReaction && sr.type !== 'resistance') {
-      results.push({ type: 'level_reaction_sr_bullish', direction: 'bullish', index: candles.length - 1, confidence: 55 + Math.min(15, sr.strength ?? 0), label: 'Reaction at S/R' });
+      results.push({ type: 'level_reaction_sr_bullish', direction: 'bullish', index: candles.length - 1, confidence: 55 + Math.min(15, Math.max(0, Number.isFinite(sr.strength) ? sr.strength : 0)), label: 'Reaction at S/R' });
     }
     if (Math.abs(last.high - sr.price) < tolerance && bearReaction && sr.type !== 'support') {
-      results.push({ type: 'level_reaction_sr_bearish', direction: 'bearish', index: candles.length - 1, confidence: 55 + Math.min(15, sr.strength ?? 0), label: 'Reaction at S/R' });
+      results.push({ type: 'level_reaction_sr_bearish', direction: 'bearish', index: candles.length - 1, confidence: 55 + Math.min(15, Math.max(0, Number.isFinite(sr.strength) ? sr.strength : 0)), label: 'Reaction at S/R' });
     }
   }
 

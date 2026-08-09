@@ -86,5 +86,9 @@ export function useSweepChochTracker() {
     return confirmed;
   }
 
-  return { update };
+  function reset() {
+    pendingRef.current = [];
+  }
+
+  return { update, reset };
 }

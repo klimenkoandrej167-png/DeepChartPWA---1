@@ -69,6 +69,9 @@ export function usePatternDetection() {
       preCloseFiredRef.current  = -1;
       postCloseFiredRef.current = -1;
       lastPatternsRef.current = new Set();
+      prevM5SweepsRef.current = [];
+      levelSignalsThisCandleRef.current = [];
+      chochTracker.reset();
       reset();
     }
   }, [symbol, interval, reset]);
@@ -110,11 +113,24 @@ export function usePatternDetection() {
       ...confirmedChoch,
     ];
     const newSignals = allSignalsForDispatch.filter(p => {
-      const k = `${p.type}_${p.index}`;
+      const candleTime = finalizedCandles[p.index]?.time ?? 0;
+      const k = `${p.type}_${candleTime}`;
       if (lastPatternsRef.current.has(k)) return false;
       lastPatternsRef.current.add(k);
       return true;
     });
+
+    // Prune keys referencing candle times no longer in the array
+    if (finalizedCandles.length > 0) {
+      const oldestTime = finalizedCandles[0].time;
+      const pruned = new Set<string>();
+      for (const k of lastPatternsRef.current) {
+      const parts = k.lastIndexOf('_');
+      const t = Number(k.slice(parts + 1));
+      if (t >= oldestTime) pruned.add(k);
+      }
+      lastPatternsRef.current = pruned;
+    }
 
     for (const p of newSignals) {
       if (p.confidence < CLOSE_WINDOW_MIN_CONFIDENCE) continue;
@@ -180,6 +196,8 @@ export function usePatternDetection() {
           && preCloseFiredRef.current !== last.time) {
         preCloseFiredRef.current = last.time;
 
+        // Resolve the prediction for the previously-closed candle (cs[length-2])
+        // using its finalized close. The forming candle (cs[length-1]) is still open.
         const prev = cs[cs.length - 2];
         if (prev) {
           resolvePrediction({ symbol, interval, candleTime: prev.time, actualClose: prev.close });
@@ -193,12 +211,15 @@ export function usePatternDetection() {
       if (secondsLeft <= 0 && postCloseFiredRef.current !== last.time) {
         postCloseFiredRef.current = last.time;
 
-        const prev = cs[cs.length - 2];
-        if (prev) {
-          resolvePrediction({ symbol, interval, candleTime: prev.time, actualClose: prev.close });
-        }
+        // Resolve the prediction for the just-closed candle (cs[length-1]).
+        // At post-close, last is still the candle that just closed (or a new
+        // one just opened). We resolve last.time with last.close.
+        resolvePrediction({ symbol, interval, candleTime: last.time, actualClose: last.close });
 
-        // Detect level reactions only on the closed candle — not every 2s on the forming candle
+        // Run engine first so indicators are fresh for level reaction detection
+        analysisRef.current(cs, false);
+
+        // Detect level reactions using freshly-computed indicators
         const indState = useIndicatorStore.getState().values;
         const htfState = useHtfContextStore.getState();
         const levelSignals = detectLevelReactions({
@@ -210,10 +231,9 @@ export function usePatternDetection() {
         });
         levelSignalsThisCandleRef.current = levelSignals;
 
-        analysisRef.current(cs, false);
-
         for (const p of levelSignals) {
-          const k = `${p.type}_${p.index}`;
+          const candleTime = cs[p.index]?.time ?? last.time;
+          const k = `${p.type}_${candleTime}`;
           if (lastPatternsRef.current.has(k)) continue;
           lastPatternsRef.current.add(k);
           if (p.confidence < CLOSE_WINDOW_MIN_CONFIDENCE) continue;
@@ -222,7 +242,7 @@ export function usePatternDetection() {
             pattern: p,
             symbol,
             interval,
-            candleTime: cs[p.index]?.time ?? last.time,
+            candleTime,
             createdAt: Date.now(),
             preClose: false,
           });

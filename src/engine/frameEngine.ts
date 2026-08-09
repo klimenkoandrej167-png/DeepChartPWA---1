@@ -1,5 +1,6 @@
 import type { Candle } from '../types/candle';
 import { calcEMA } from '../indicators/ema';
+import { calcATR } from '../indicators/atr';
 import { detectSwings } from '../indicators/trendStructure';
 import { calcSupportResistance } from '../indicators/supportResistance';
 import { calcSmartMoney } from '../indicators/superOrderBlock';
@@ -20,11 +21,12 @@ export function computeFrameData(candles: Candle[], symbol: string) {
 
   const ema20 = calcEMA(closes, 20);
   const ema50 = calcEMA(closes, 50);
+  const atr = calcATR(candles);
   const swings = detectSwings(highs, lows);
   const srLevels = calcSupportResistance(highs, lows, 100, closes[closes.length - 1]);
   const sm = calcSmartMoney(candles);
   const volumeProfile = calcVolumeProfile(candles, symbol);
   const liquidityPools = detectLiquidityPools(candles);
 
-  return { ema20, ema50, swings, srLevels, ...sm, volumeProfile, liquidityPools };
+  return { ema20, ema50, atr, swings, srLevels, ...sm, volumeProfile, liquidityPools };
 }

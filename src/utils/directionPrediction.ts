@@ -99,8 +99,7 @@ function computeStructureScore(m5: HtfFrame, m15: HtfFrame, bias: Bias): number 
     else if (s.type === 'LH' || s.type === 'LL') bear++;
   }
 
-  const total = bull + bear;
-  if (total === 0) return 0;
+  if (bull + bear === 0) return 0;
 
   const recentBos = m5.bosEvents.slice(-3);
   for (const b of recentBos) {
@@ -156,9 +155,6 @@ function computeZonesScore(
   return clamp(bullScore - bearScore);
 }
 
-// Inline import to avoid circular dependency at module level
-import { detectLiquiditySweepReaction } from '../patterns/advanced/liquiditySweepReaction';
-
 const SWEEP_BULL_TYPES = new Set([
   'liquidity_sweep_bullish',
   'liquidity_sweep_continuation_bullish',
@@ -170,14 +166,8 @@ const SWEEP_BEAR_TYPES = new Set([
   'liquidity_sweep_reversal_bearish',
 ]);
 
-function detectLiquiditySweepSafe(candles: import('../types/candle').Candle[]): PatternResult[] {
-  if (candles.length < 12) return [];
-  return detectLiquiditySweepReaction(candles);
-}
-
 function computeLiquidityScore(
   recentSignals: PatternResult[],
-  m5Candles: import('../types/candle').Candle[],
   m5Pools: LiquidityPool[],
   m15Pools: LiquidityPool[],
   lastPrice: number,
@@ -185,16 +175,11 @@ function computeLiquidityScore(
 ): number {
   let bull = 0, bear = 0;
 
-  // Recent sweep events (already happened) — covers generic + continuation + reversal types
+  // Recent sweep events (already happened) — covers generic + continuation + reversal types.
+  // m5Sweeps are already included in recentSignals via the engine's allRecent array.
   for (const p of recentSignals) {
     if (SWEEP_BULL_TYPES.has(p.type)) bull += p.confidence / 100;
     else if (SWEEP_BEAR_TYPES.has(p.type)) bear += p.confidence / 100;
-  }
-
-  const m5Sweeps = detectLiquiditySweepSafe(m5Candles);
-  for (const p of m5Sweeps.slice(-3)) {
-    if (p.direction === 'bullish') bull += 0.5;
-    else if (p.direction === 'bearish') bear += 0.5;
   }
 
   // Proximity to unswept liquidity pools (early warning, weaker)
@@ -325,11 +310,9 @@ export function computeDirectionScore(inputs: DirectionInputs): DirectionResult 
   let liquidityScore = 0;
   let liquidityWeight = 0;
   if (pi.liquidity) {
-    const m5AtrVal = lastFinite(inputs.htf.m5.candles.length > 0
-      ? inputs.atr
-      : []) ?? 0;
+    const m5AtrVal = lastFinite(inputs.htf.m5.atr ?? []) ?? lastFinite(inputs.atr) ?? 0;
     liquidityScore = computeLiquidityScore(
-      inputs.recentSignals, inputs.htf.m5.candles,
+      inputs.recentSignals,
       inputs.htf.m5.liquidityPools, inputs.htf.m15.liquidityPools,
       inputs.lastPrice, m5AtrVal,
     );

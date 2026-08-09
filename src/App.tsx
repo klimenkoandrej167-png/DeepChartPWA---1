@@ -48,7 +48,8 @@ export default function App() {
   const symbol       = useChartStore(s => s.symbol);
   const sourceStatus = useChartStore(s => s.sourceStatus);
   const signalCount  = useSignalStore(s => s.signals.length);
-  const { twelvedataKey, finnhubKey } = useKeysStore();
+  const twelvedataKey = useKeysStore(s => s.twelvedataKey);
+  const finnhubKey    = useKeysStore(s => s.finnhubKey);
 
   useDataSource();
   usePatternDetection();

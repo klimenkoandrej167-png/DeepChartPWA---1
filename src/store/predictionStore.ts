@@ -94,6 +94,8 @@ function recalibrate(history: Prediction[]): CalibrationStats {
   };
 }
 
+let resolveCount = 0;
+
 export const usePredictionStore = create<PredictionState>()(
   persist(
     (set, get) => ({
@@ -122,7 +124,7 @@ export const usePredictionStore = create<PredictionState>()(
         const actualUp    = actualClose > pred.priceAtPrediction;
         const predictedUp = pred.score > 0;
         const tie      = actualClose === pred.priceAtPrediction;
-        const correct  = pred.score === 0 || tie ? null : actualUp === predictedUp;
+        const correct  = (pred.score === 0 || tie) ? null : actualUp === predictedUp;
 
         const resolved: Prediction = {
           ...pred,
@@ -140,7 +142,7 @@ export const usePredictionStore = create<PredictionState>()(
           return {
             history: newHistory,
             current: { ...state.current, [k]: resolved },
-            calibration: recalibrate(newHistory),
+            calibration: (++resolveCount % 5 === 0) ? recalibrate(newHistory) : get().calibration,
           };
         });
       },

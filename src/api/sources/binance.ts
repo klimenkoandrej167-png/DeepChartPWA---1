@@ -59,7 +59,7 @@ export async function fetchBinanceCandles(
     if (!res.ok) throw new Error(`Binance HTTP ${res.status}`);
     const data: unknown[][] = await res.json() as unknown[][];
 
-    if (data.length === 0) break;
+    if (!Array.isArray(data) || data.length === 0) break;
 
     const batch: Candle[] = data.map(k => ({
       time:   Math.floor(Number(k[0]) / 1000),
@@ -171,11 +171,14 @@ export function subscribeBinanceTicks(
     ws = null;
   }
 
+  let reconnectTimerId: ReturnType<typeof setTimeout> | null = null;
+
   function scheduleReconnect() {
     if (stopped) return;
     const delay = BACKOFF[Math.min(attempt, BACKOFF.length - 1)];
     attempt++;
-    setTimeout(() => {
+    reconnectTimerId = setTimeout(() => {
+      reconnectTimerId = null;
       reconnecting = false;
       connect();
     }, delay);
@@ -185,6 +188,7 @@ export function subscribeBinanceTicks(
 
   return () => {
     stopped = true;
+    if (reconnectTimerId) { clearTimeout(reconnectTimerId); reconnectTimerId = null; }
     cleanupSocket();
   };
 }

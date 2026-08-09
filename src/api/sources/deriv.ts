@@ -428,11 +428,14 @@ export function subscribeDerivTicks(
     ws = null;
   }
 
+  let reconnectTimerId: ReturnType<typeof setTimeout> | null = null;
+
   function scheduleReconnect() {
     if (stopped) return;
     const delay = BACKOFF[Math.min(attempt, BACKOFF.length - 1)];
     attempt++;
-    setTimeout(() => {
+    reconnectTimerId = setTimeout(() => {
+      reconnectTimerId = null;
       reconnecting = false;
       connect();
     }, delay);
@@ -443,6 +446,7 @@ export function subscribeDerivTicks(
 
   return () => {
     stopped = true;
+    if (reconnectTimerId) { clearTimeout(reconnectTimerId); reconnectTimerId = null; }
     cleanupSocket();
   };
 }

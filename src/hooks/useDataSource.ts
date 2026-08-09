@@ -52,13 +52,18 @@ export function useDataSource() {
         if (cancelled) return;
 
         const candles = compactGaps(raw, interval);
+        if (cancelled) return;
         setCandles(candles);
         setStatus('live');
 
+        let lastTickTime = 0;
         const unsub = router.subscribeTicks((tick) => {
           if (cancelled) return;
           updateOrAppend(tick);
-          appendCachedCandle(symbol, interval, tick);
+          if (tick.time > lastTickTime) {
+            lastTickTime = tick.time;
+            appendCachedCandle(symbol, interval, tick);
+          }
           if (useChartStore.getState().sourceStatus === 'stale') {
             setStatus('live');
           }

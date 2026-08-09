@@ -10,6 +10,7 @@ export interface HtfFrame {
   candles:       Candle[];
   ema20:         number[];
   ema50:         number[];
+  atr:           number[];
   swings:        SwingPoint[];
   srLevels:      SRLevel[];
   orderBlocks:   OrderBlock[];
@@ -23,7 +24,7 @@ export interface HtfFrame {
 export type HtfTf = 'h1' | 'm15' | 'm5';
 
 const EMPTY_FRAME: HtfFrame = {
-  candles: [], ema20: [], ema50: [],
+  candles: [], ema20: [], ema50: [], atr: [],
   swings: [], srLevels: [], orderBlocks: [], fvgs: [], bosEvents: [],
   volumeProfile: null, liquidityPools: [],
   status: 'offline',
